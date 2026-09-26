@@ -1,0 +1,10 @@
+# Store text files with LF line endings, so Windows, Linux (Docker, CI) and macOS all agree.
+* text=auto eol=lf
+
+# Binary files: never touch line endings
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.pdf binary
