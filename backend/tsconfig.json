@@ -1,5 +1,5 @@
 {
-  // Type-checking settings for all backend code (src + test). Nothing is emitted here;
+  // Type-checking settings for all backend code (src, test, prisma and config files). Nothing is emitted here;
   // tsconfig.build.json compiles src/ to dist/ for production.
   "compilerOptions": {
     "target": "ES2023",
@@ -14,5 +14,5 @@
     "forceConsistentCasingInFileNames": true,
     "noEmit": true
   },
-  "include": ["src", "test"]
+  "include": ["src", "test", "prisma", "prisma.config.ts", "vitest.config.ts"]
 }

@@ -1,10 +1,12 @@
 import { createApp } from './app.js';
 import { loadEnv } from './config/env.js';
 import { createLogger } from './lib/logger.js';
+import { createPrismaClient } from './lib/prisma.js';
 
 const env = loadEnv();
 const logger = createLogger(env.LOG_LEVEL);
-const app = createApp(logger);
+const prisma = createPrismaClient(env.DATABASE_URL);
+const app = createApp({ logger, prisma });
 
 const server = app.listen(env.PORT, (error?: Error) => {
   if (error) {
@@ -19,6 +21,9 @@ const server = app.listen(env.PORT, (error?: Error) => {
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.on(signal, () => {
     logger.info({ signal }, 'shutting down');
-    server.close(() => process.exit(0));
+    server.close(async () => {
+      await prisma.$disconnect(); // close database connections cleanly
+      process.exit(0);
+    });
   });
 }

@@ -23,6 +23,9 @@
 | 2026-09-26 | Auth | Claude | Keep the login token in `localStorage` and send it as a Bearer header | **Changed**: httpOnly cookie through a Next.js same-origin proxy | Page scripts cannot read the token; no CORS needed |
 | 2026-09-26 | Fare | ChatGPT | Fare of ৳80 + ৳12/km with a flat ৳20 pool discount | Rejected | Kept ৳50 + ৳25/km with 20% off: whole-taka answers and a discount that scales with distance |
 | 2026-09-26 | Security | Claude | Add `cors` middleware | Dropped after the cookie decision | Same-origin proxy means there are no cross-origin calls to allow |
+| 2026-09-26 | Database | Claude | Write partial unique indexes as `status IN (...)` | **Changed** to `status = 'A' OR status = 'B'` | Testing showed PostgreSQL rewrites `IN` into `= ANY (ARRAY[...])`, so Prisma saw drift and tried to recreate the indexes on every migration |
+| 2026-09-26 | Database | Claude | Use `prisma migrate diff --from-migrations` in CI | **Changed** to `migrate deploy` + `--from-config-datasource` diff | The first form needs an extra shadow database in Prisma 7 |
+| 2026-09-26 | Database | Claude | Keep the seed logic in `src/db/seedCast.ts`, with `prisma/seed.ts` as a thin entry point | Accepted | Tests can call the same seed function directly |
 
 ## Candidates for the README
 

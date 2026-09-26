@@ -1,17 +1,25 @@
 import request from 'supertest';
-import { describe, expect, it } from 'vitest';
+import { afterAll, describe, expect, it } from 'vitest';
 import { createApp } from '../../src/app.js';
 import { createLogger } from '../../src/lib/logger.js';
+import { createPrismaClient } from '../../src/lib/prisma.js';
+import { createTestPrisma } from '../helpers/db.js';
 
 // A silent logger keeps test output readable.
-const app = createApp(createLogger('silent'));
+const logger = createLogger('silent');
+const prisma = createTestPrisma();
+const app = createApp({ logger, prisma });
+
+afterAll(async () => {
+  await prisma.$disconnect();
+});
 
 describe('GET /health', () => {
-  it('[I-HEALTH-01] reports that the API is up', async () => {
+  it('[I-HEALTH-01] reports that the API and the database are up', async () => {
     const res = await request(app).get('/health');
 
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ status: 'ok' });
+    expect(res.body).toEqual({ status: 'ok', database: 'ok' });
   });
 
   it('[I-HEALTH-01] sends security headers and a request id', async () => {
@@ -20,6 +28,18 @@ describe('GET /health', () => {
     expect(res.headers['x-content-type-options']).toBe('nosniff'); // from helmet
     expect(res.headers['x-powered-by']).toBeUndefined(); // helmet hides "Express"
     expect(res.headers['x-request-id']).toMatch(/^[0-9a-f-]{36}$/);
+  });
+
+  it('[I-HEALTH-02] returns 503 when the database cannot be reached', async () => {
+    // Port 1 on localhost: nothing listens there, so every connection fails immediately.
+    const unreachable = createPrismaClient('postgresql://nobody:nothing@localhost:1/nowhere');
+    const brokenApp = createApp({ logger, prisma: unreachable });
+
+    const res = await request(brokenApp).get('/health');
+
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({ status: 'error', database: 'unreachable' });
+    await unreachable.$disconnect();
   });
 });
 

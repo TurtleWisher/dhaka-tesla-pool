@@ -378,9 +378,11 @@ erDiagram
 - **Why it fits.** The DB rejects invalid statuses and zones with no join, and Prisma generates matching TypeScript unions.
 - **Would change if.** Zones became admin-editable (then a `zones` table with FKs).
 
-**Constraints written in SQL where Prisma cannot express them**
-- `CHECK` constraints and partial unique indexes are added by hand-editing the generated migration SQL.
-- **Risk (R-12).** Prisma's drift detection may not know about hand-written objects. Before relying on them, we confirm how the pinned Prisma version treats them (native support for partial indexes vs raw SQL).
+**Where each constraint is written**
+- **Partial unique indexes** (one active pool per vehicle, one active request per passenger, one active membership per request) are declared in `schema.prisma` with Prisma's `partialIndexes` preview feature, so Prisma knows about them and never tries to drop them.
+- Their conditions are written as `status = 'A' OR status = 'B'` rather than `status IN ('A', 'B')`. PostgreSQL rewrites `IN (...)` into `= ANY (ARRAY[...])`, which Prisma then sees as a different index and tries to recreate on every migration; the `OR` form round-trips unchanged.
+- **CHECK constraints** cannot be expressed in `schema.prisma`, so they are appended by hand to the initial migration (`prisma/migrations/*_init/migration.sql`, "Part 2"). Prisma ignores CHECK constraints when comparing the schema to the database, so they cause no drift.
+- **Drift guard (R-12).** CI applies all migrations to an empty database and then runs `prisma migrate diff --exit-code`; the build fails if `schema.prisma` changed without a matching migration.
 
 ---
 
@@ -707,7 +709,7 @@ Example, passenger cancel of a matched request:
 | R-09 | Privacy leak of co-rider data | DTO shaping | I-AUTHZ-03 |
 | R-10 | Role escalation (register as driver, passenger calls driver API) | Ignore `role` in body; `requireRole` | I-AUTH-03, I-AUTH-04 |
 | R-11 | Fare changes after start, or rounding errors | Lock at start; integer math; CHECK on breakdown | I-FARE-01, U-FARE-04 |
-| R-12 | Prisma drift vs hand-written CHECK/partial indexes | Verify migration behaviour before relying on them | I-DB-01 |
+| R-12 | Prisma drift vs hand-written CHECK/partial indexes | Native partial indexes in the schema; CHECKs in the migration; CI drift check | CI `migrate diff` step, I-DB-01..08 |
 | R-13 | Driver goes offline mid-ride / accepts while offline | Availability guards | I-DRV-01 |
 | R-14 | Stale requests never expire | Documented limitation (A-19) | – |
 | R-15 | Proxy target `API_INTERNAL_URL` must be known to the Next.js server; if it is read only at build time, Docker/deploy break | Options: build arg, or a small runtime Route Handler proxy; document in README | E2E in Docker |
@@ -740,8 +742,9 @@ Example, passenger cancel of a matched request:
 
 | ID | Asserts |
 |---|---|
-| I-HEALTH-01 | `/health` returns `{status: "ok"}` with helmet headers and an `x-request-id`; also checks the database once it exists |
-| I-SEED-01 | Seed creates the cast; Bullet capacity 3; re-running seed changes nothing |
+| I-HEALTH-01 | `/health` returns `{status: "ok", database: "ok"}` with helmet headers and an `x-request-id` |
+| I-HEALTH-02 | `/health` returns 503 `{status: "error", database: "unreachable"}` when the database is down |
+| I-SEED-01 | Seed creates the cast; Bullet capacity 3; passwords stored as bcrypt hashes; re-running seed changes nothing |
 | I-AUTH-01 | Register + login return a token; Jashim can log in |
 | I-AUTH-02 | Wrong password and unknown email both → 401 with the same message |
 | I-AUTH-03 | `register` with `role: "DRIVER"` still creates a passenger |
@@ -763,7 +766,14 @@ Example, passenger cancel of a matched request:
 | I-CON-02 | Jashim double-accepts Nusrat's request concurrently: one pool, one membership, one 409 |
 | I-CON-03 | Nusrat submits two requests concurrently: one created, one 409 |
 | I-CON-04 | Nusrat cancels while Jashim starts: outcomes are only (cancelled, pool continues or auto-cancels) or (started, cancel 409) |
-| I-DB-01 | A direct SQL write setting `seats_available = -1` violates the CHECK |
+| I-DB-01 | A direct write setting `seats_available` below 0 or above capacity violates the CHECK |
+| I-DB-02 | A second unfinished pool for the same vehicle violates `pools_one_active_per_vehicle` |
+| I-DB-03 | Same pickup and drop-off zone, 0 seats or 4 seats are refused |
+| I-DB-04 | A second active request for the same passenger violates `ride_requests_one_active_per_passenger`; allowed again after cancelling |
+| I-DB-05 | A fare breakdown that does not add up, or is only half written, is refused |
+| I-DB-06 | A request cannot be ACTIVE in two pools at once |
+| I-DB-07 | A history event with neither pool nor request is refused |
+| I-DB-08 | Emails are stored lowercase only |
 | I-LIFE-01 | Happy path arrive → start → complete; request statuses and timestamps follow |
 | I-LIFE-02 | Start before arrive, complete before start, arrive twice, act on completed pool → 409 `INVALID_TRANSITION` |
 | I-CANCEL-01 | Cancel while `REQUESTED` |

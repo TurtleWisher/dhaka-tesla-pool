@@ -1,0 +1,226 @@
+// Dhaka Tesla Pool database schema.
+// Design and reasoning: docs/architecture.md §7 (ERD, table-by-table notes).
+// CHECK constraints cannot be written in this file; they are added by hand in the
+// initial migration (prisma/migrations/*_init/migration.sql).
+
+generator client {
+  provider        = "prisma-client"
+  output          = "../src/generated/prisma"
+  previewFeatures = ["partialIndexes"]
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------------------
+// Enums: the database itself rejects any value that is not listed here.
+// ---------------------------------------------------------------------------
+
+enum UserRole {
+  PASSENGER
+  DRIVER
+}
+
+enum Zone {
+  BANANI
+  GULSHAN_1
+  GULSHAN_2
+  MOHAKHALI
+  FARMGATE
+  DHANMONDI
+  MIRPUR_10
+  UTTARA
+  BASHUNDHARA
+}
+
+enum PoolStatus {
+  ACCEPTED
+  DRIVER_ARRIVED
+  STARTED
+  COMPLETED
+  CANCELLED
+}
+
+enum RequestStatus {
+  REQUESTED
+  MATCHED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+enum MemberStatus {
+  ACTIVE
+  LEFT // the passenger cancelled
+  REMOVED // the driver cancelled the pool
+}
+
+enum PaymentMethod {
+  CASH
+}
+
+enum EventType {
+  REQUEST_CREATED
+  REQUEST_MATCHED
+  REQUEST_REQUEUED
+  REQUEST_CANCELLED
+  POOL_CREATED
+  DRIVER_ARRIVED
+  POOL_STARTED
+  FARE_LOCKED
+  POOL_COMPLETED
+  POOL_CANCELLED
+}
+
+// ---------------------------------------------------------------------------
+// People and vehicles
+// ---------------------------------------------------------------------------
+
+/// Everyone who can log in: passengers and drivers.
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  name         String
+  email        String   @unique // stored lowercase (CHECK in migration)
+  passwordHash String   @map("password_hash")
+  role         UserRole
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  driverProfile DriverProfile?
+  rideRequests  RideRequest[]
+  actedEvents   RideEvent[]    @relation("EventActor")
+
+  @@map("users")
+}
+
+/// Driver-only data. Vehicles reference this table, so only a driver can own a vehicle.
+model DriverProfile {
+  userId    String   @id @map("user_id") @db.Uuid
+  isOnline  Boolean  @default(false) @map("is_online")
+  updatedAt DateTime @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  vehicle Vehicle?
+
+  @@map("driver_profiles")
+}
+
+/// A Tesla, e.g. Bullet with capacity 3. One vehicle per driver.
+model Vehicle {
+  id        String   @id @default(uuid()) @db.Uuid
+  driverId  String   @unique @map("driver_id") @db.Uuid
+  name      String
+  capacity  Int      @db.SmallInt // CHECK 1..6 in migration
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  driver DriverProfile @relation(fields: [driverId], references: [userId])
+  pools  Pool[]
+
+  @@map("vehicles")
+}
+
+// ---------------------------------------------------------------------------
+// Rides
+// ---------------------------------------------------------------------------
+
+/// One shared trip in one vehicle. Created when a driver accepts a request.
+model Pool {
+  id             String     @id @default(uuid()) @db.Uuid
+  vehicleId      String     @map("vehicle_id") @db.Uuid
+  pickupZone     Zone       @map("pickup_zone")
+  status         PoolStatus @default(ACCEPTED)
+  capacity       Int        @db.SmallInt // snapshot of the vehicle's capacity
+  seatsAvailable Int        @map("seats_available") @db.SmallInt // CHECK 0..capacity in migration
+  createdAt      DateTime   @default(now()) @map("created_at") @db.Timestamptz(6) // = accepted at
+  arrivedAt      DateTime?  @map("arrived_at") @db.Timestamptz(6)
+  startedAt      DateTime?  @map("started_at") @db.Timestamptz(6)
+  completedAt    DateTime?  @map("completed_at") @db.Timestamptz(6)
+  cancelledAt    DateTime?  @map("cancelled_at") @db.Timestamptz(6)
+  updatedAt      DateTime   @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  vehicle Vehicle      @relation(fields: [vehicleId], references: [id])
+  members PoolMember[]
+  events  RideEvent[]
+
+  // A vehicle can have at most one pool that is not finished.
+  @@unique([vehicleId], map: "pools_one_active_per_vehicle", where: raw("status = 'ACCEPTED' OR status = 'DRIVER_ARRIVED' OR status = 'STARTED'"))
+  @@index([status, pickupZone])
+  @@index([vehicleId, createdAt(sort: Desc)])
+  @@map("pools")
+}
+
+/// One passenger's request, their own status and their own fare.
+model RideRequest {
+  id                  String        @id @default(uuid()) @db.Uuid
+  passengerId         String        @map("passenger_id") @db.Uuid
+  pickupZone          Zone          @map("pickup_zone")
+  dropoffZone         Zone          @map("dropoff_zone") // CHECK <> pickup_zone in migration
+  seats               Int           @db.SmallInt // CHECK 1..3 in migration
+  status              RequestStatus @default(REQUESTED)
+  distanceM           Int           @map("distance_m") // snapshot from the zone distance table
+  estimatedFarePoysha Int           @map("estimated_fare_poysha") // solo estimate at creation
+  // Final fare breakdown, set once when the trip starts (all four set, or none).
+  fareBasePoysha      Int?          @map("fare_base_poysha")
+  fareDistancePoysha  Int?          @map("fare_distance_poysha")
+  fareDiscountPoysha  Int?          @map("fare_discount_poysha")
+  fareTotalPoysha     Int?          @map("fare_total_poysha")
+  paymentMethod       PaymentMethod @default(CASH) @map("payment_method")
+  createdAt           DateTime      @default(now()) @map("created_at") @db.Timestamptz(6)
+  matchedAt           DateTime?     @map("matched_at") @db.Timestamptz(6)
+  startedAt           DateTime?     @map("started_at") @db.Timestamptz(6)
+  completedAt         DateTime?     @map("completed_at") @db.Timestamptz(6)
+  cancelledAt         DateTime?     @map("cancelled_at") @db.Timestamptz(6)
+  updatedAt           DateTime      @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  passenger   User         @relation(fields: [passengerId], references: [id])
+  memberships PoolMember[]
+  events      RideEvent[]
+
+  // A passenger can have at most one request that is still active.
+  @@unique([passengerId], map: "ride_requests_one_active_per_passenger", where: raw("status = 'REQUESTED' OR status = 'MATCHED' OR status = 'IN_PROGRESS'"))
+  @@index([status, pickupZone, createdAt])
+  @@index([passengerId, createdAt(sort: Desc)])
+  @@map("ride_requests")
+}
+
+/// Which request is (or was) in which pool. A request can pass through several pools
+/// if a driver cancels, so this is its own table rather than a column on ride_requests.
+model PoolMember {
+  id            String       @id @default(uuid()) @db.Uuid
+  poolId        String       @map("pool_id") @db.Uuid
+  rideRequestId String       @map("ride_request_id") @db.Uuid
+  status        MemberStatus @default(ACTIVE)
+  joinedAt      DateTime     @default(now()) @map("joined_at") @db.Timestamptz(6)
+  leftAt        DateTime?    @map("left_at") @db.Timestamptz(6)
+
+  pool        Pool        @relation(fields: [poolId], references: [id])
+  rideRequest RideRequest @relation(fields: [rideRequestId], references: [id])
+
+  @@unique([poolId, rideRequestId])
+  // A request can be ACTIVE in at most one pool at a time.
+  @@unique([rideRequestId], map: "pool_members_one_active_per_request", where: raw("status = 'ACTIVE'"))
+  @@index([poolId, status])
+  @@map("pool_members")
+}
+
+/// Append-only history: who changed what, when. Never updated or deleted by the app.
+model RideEvent {
+  id            BigInt    @id @default(autoincrement())
+  poolId        String?   @map("pool_id") @db.Uuid
+  rideRequestId String?   @map("ride_request_id") @db.Uuid
+  actorUserId   String?   @map("actor_user_id") @db.Uuid // NULL = the system did it
+  type          EventType
+  fromStatus    String?   @map("from_status")
+  toStatus      String?   @map("to_status")
+  data          Json?
+  createdAt     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  pool        Pool?        @relation(fields: [poolId], references: [id], onDelete: Restrict)
+  rideRequest RideRequest? @relation(fields: [rideRequestId], references: [id], onDelete: Restrict)
+  actor       User?        @relation("EventActor", fields: [actorUserId], references: [id], onDelete: Restrict)
+
+  @@index([rideRequestId, createdAt])
+  @@index([poolId, createdAt])
+  @@map("ride_events")
+}
