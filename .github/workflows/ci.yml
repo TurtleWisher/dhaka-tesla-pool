@@ -14,6 +14,24 @@ jobs:
     defaults:
       run:
         working-directory: backend
+    # A real PostgreSQL for the integration tests, started before the steps run.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: dtp
+          POSTGRES_PASSWORD: dtp_ci_only
+          POSTGRES_DB: dhaka_tesla_pool
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U dtp -d dhaka_tesla_pool"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://dtp:dtp_ci_only@localhost:5432/dhaka_tesla_pool
+      TEST_DATABASE_URL: postgresql://dtp:dtp_ci_only@localhost:5432/dhaka_tesla_pool_test
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v6
@@ -21,8 +39,12 @@ jobs:
           node-version: 24
           cache: npm
           cache-dependency-path: backend/package-lock.json
-      - run: npm ci
+      - run: npm ci # also runs "postinstall": prisma generate
       - run: npm run typecheck
+      # Apply every migration to a brand-new database, exactly as a deployment would.
+      - run: npx prisma migrate deploy
+      # Fails (exit code 2) if schema.prisma changed without a matching migration.
+      - run: npx prisma migrate diff --from-config-datasource --to-schema prisma/schema.prisma --exit-code
       - run: npm test
 
   frontend:
