@@ -3,14 +3,21 @@ import express, { type Express } from 'express';
 import helmet from 'helmet';
 import type { Logger } from 'pino';
 import { pinoHttp } from 'pino-http';
+import type { PrismaClient } from './lib/prisma.js';
 import { errorHandler, notFound } from './middleware/errorHandler.js';
-import { healthRouter } from './modules/health/health.routes.js';
+import { createHealthRouter } from './modules/health/health.routes.js';
+
+/** Everything the app needs from the outside world, passed in so tests can supply their own. */
+export interface AppDependencies {
+  logger: Logger;
+  prisma: PrismaClient;
+}
 
 /**
  * Builds the Express app without starting a server.
  * Tests import this directly (Supertest), and server.ts calls listen() on it.
  */
-export function createApp(logger: Logger): Express {
+export function createApp({ logger, prisma }: AppDependencies): Express {
   const app = express();
 
   // 1. Give every request an id and log it (the id is also returned as a header for debugging).
@@ -32,7 +39,7 @@ export function createApp(logger: Logger): Express {
   app.use(express.json({ limit: '10kb' }));
 
   // 4. Routes.
-  app.use(healthRouter);
+  app.use(createHealthRouter(prisma));
 
   // 5. Nothing matched, then turn every error into a consistent JSON response.
   app.use(notFound);
