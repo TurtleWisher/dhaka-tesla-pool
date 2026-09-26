@@ -1,0 +1,27 @@
+# Local development services. Currently the database; backend and frontend containers come later.
+# Start:  docker compose up -d db      Stop:  docker compose down
+name: dhaka-tesla-pool
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-dtp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dtp_local_dev_only}
+      POSTGRES_DB: ${POSTGRES_DB:-dhaka_tesla_pool}
+    ports:
+      # host port : container port
+      - "${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      # Named volume, so data survives container restarts
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # "Healthy" only once Postgres accepts connections; later services will wait for this
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
