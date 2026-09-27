@@ -26,7 +26,7 @@ The README "Key decisions" section summarises them.
 | Database | PostgreSQL 17 | Source of truth, constraints, row locking | Relational integrity, CHECK constraints, partial unique indexes and row-level locks fit a capacity problem |
 | ORM | Prisma | Schema, migrations, typed queries, interactive transactions | Typed client and readable migrations; raw SQL still available where needed |
 | Validation | Zod | Request bodies, params, query and environment config | One schema gives runtime validation and TypeScript types |
-| Auth | JWT + bcrypt, httpOnly cookie | Stateless sessions, password hashing | Simple, no session store; the cookie keeps the token away from page scripts |
+| Auth | JWT (`jsonwebtoken`) + bcrypt, httpOnly cookie | Stateless sessions, password hashing | Simple, no session store; the cookie keeps the token away from page scripts |
 | Logging | pino + pino-http | Structured JSON logs with a request id | Fast, standard, searchable |
 | Security headers | helmet | Standard HTTP security headers | One line, well maintained |
 | Tests | Vitest, Supertest, Playwright | Unit, API integration against real Postgres, browser E2E | Fast TypeScript-native runner; Supertest drives the Express app without a network port |
@@ -34,7 +34,7 @@ The README "Key decisions" section summarises them.
 | CI | GitHub Actions | Type check, tests and frontend build on every pull request | Free for public repositories |
 | Runtime | Docker Compose | `db`, `backend`, `frontend` services | One command to run everything |
 
-`cors` is intentionally absent: the browser only talks to the Next.js origin, which forwards `/api/*` to Express, so there are no cross-origin calls to allow. `cookie-parser` and `express-rate-limit` will be added with authentication.
+`cors` is intentionally absent: the browser only talks to the Next.js origin, which forwards `/api/*` to Express, so there are no cross-origin calls to allow. Authentication adds `jsonwebtoken` (signs and verifies session tokens), `cookie-parser` (reads the session cookie) and `express-rate-limit` (limits login and register attempts).
 
 ---
 
@@ -160,7 +160,7 @@ flowchart TB
 
 ### 6.2 Request lifecycle inside the API
 
-`request-id → pino-http → helmet → json(limit 10kb) → cookie parsing → origin check (non-GET) → rateLimit(/auth) → authenticate → requireRole → validate(zod) → handler → service → errorHandler`
+`request-id → pino-http → helmet → json(limit 10kb) → cookie parsing → origin check (non-GET) → rateLimit(/auth/login, /auth/register) → authenticate → requireRole → handler (parseBody with Zod) → service → errorHandler`
 
 ### 6.3 API surface (REST, versioned under `/api/v1`)
 
@@ -197,8 +197,12 @@ flowchart TB
 
 ### 6.4 Authentication and authorization
 
-- **Authentication.** `POST /auth/login` checks the bcrypt hash (cost 12 in prod, 4 in tests via env), issues a JWT `{ sub: userId, role }` (HS256, 8 h) and sets it as the httpOnly `dtp_session` cookie (`SameSite=Lax`, `Secure` in production). `POST /auth/logout` clears it. `authenticate` middleware reads the cookie, verifies signature and expiry, then attaches `req.user`.
-- **CSRF.** Non-GET requests must carry an `Origin` header equal to the configured frontend origin, otherwise `403 BAD_ORIGIN`. Together with `SameSite=Lax` this blocks cross-site form posts.
+- **Authentication.** `POST /auth/login` checks the bcrypt hash (`BCRYPT_COST`: 12 by default, 4 in tests), issues a JWT `{ sub: userId, role }` (HS256 only, 8 h) and sets it as the httpOnly `dtp_session` cookie (`SameSite=Lax`, `Path=/`, `Secure` in production). `authenticate` middleware reads the cookie, verifies signature and expiry without a database lookup, then attaches `req.user`; any failure is the same `401 UNAUTHENTICATED`. `GET /auth/me` does read the user, so a deleted account's token stops working there. `POST /auth/logout` needs no session (an expired one can still be cleared) and expires the cookie.
+- **Secrets.** `JWT_SECRET` must be at least 32 characters, and the server refuses to start in production with the public example value from `.env.example`.
+- **Passwords.** 8 characters minimum, 72 **bytes** maximum, because bcrypt ignores everything after byte 72; login also refuses inputs longer than 72 bytes so a longer string can never "match". Only the hash is stored.
+- **No account probing.** A wrong password and an unknown email return the same `401 INVALID_CREDENTIALS`, and an unknown email is still compared against a dummy bcrypt hash so both take about the same time. Registering an existing email is an explicit `409 EMAIL_TAKEN` (A-30).
+- **Rate limiting.** `POST /auth/login` and `/auth/register` share a limit of `AUTH_RATE_LIMIT_MAX` (default 10) attempts per IP per 15 minutes, then `429 RATE_LIMITED` with standard `RateLimit` headers. The counter is kept in the API process's memory (R-22).
+- **CSRF.** Non-GET requests must carry an `Origin` header equal to `FRONTEND_ORIGIN`, otherwise `403 BAD_ORIGIN`; a missing `Origin` is refused too (browsers always send it on POST; `curl` users add it by hand). Together with `SameSite=Lax` this blocks cross-site form posts.
 - **Role checks.** `requireRole('PASSENGER' | 'DRIVER')` per router. Wrong role → `403 FORBIDDEN_ROLE`.
 - **Ownership checks.** Done in services by **scoping the query**, never by fetching then comparing:
   - Passenger: `rideRequest.findFirst({ where: { id, passengerId: user.id } })`
@@ -214,21 +218,21 @@ flowchart TB
 
 ### 6.5 Validation, errors, logging
 
-- **Validation.** Zod schemas per route for `body`, `params`, `query`; unknown keys stripped (so a smuggled `role` or `status` is ignored). Env vars validated at boot; the process refuses to start with a missing or short `JWT_SECRET`.
+- **Validation.** Zod schemas per route for `body`, `params`, `query`, applied with `parseBody(schema, req.body)` inside each handler so TypeScript knows the validated type; unknown keys stripped (so a smuggled `role` or `status` is ignored). Env vars validated at boot; the process refuses to start with a missing or short `JWT_SECRET`.
 - **Error envelope.** `{ "error": { "code": "POOL_FULL", "message": "...", "details": {...} } }`
 
 | HTTP | When | Example codes |
 |---|---|---|
 | 400 | Schema validation | `VALIDATION_ERROR` |
 | 401 | No/invalid/expired token, bad credentials | `UNAUTHENTICATED`, `INVALID_CREDENTIALS` |
-| 403 | Wrong role | `FORBIDDEN_ROLE` |
+| 403 | Wrong role, or a state-changing request from another origin | `FORBIDDEN_ROLE`, `BAD_ORIGIN` |
 | 404 | Missing or not yours | `NOT_FOUND` |
-| 409 | Business-rule or state conflict | `INVALID_TRANSITION`, `ACTIVE_REQUEST_EXISTS`, `REQUEST_ALREADY_MATCHED`, `RIDE_ALREADY_STARTED`, `DRIVER_OFFLINE`, `ACTIVE_POOL_EXISTS`, `SEATS_UNAVAILABLE` |
+| 409 | Business-rule or state conflict | `EMAIL_TAKEN`, `INVALID_TRANSITION`, `ACTIVE_REQUEST_EXISTS`, `REQUEST_ALREADY_MATCHED`, `RIDE_ALREADY_STARTED`, `DRIVER_OFFLINE`, `ACTIVE_POOL_EXISTS`, `SEATS_UNAVAILABLE` |
 | 429 | Rate limit | `RATE_LIMITED` |
 | 500 | Anything unexpected; no stack trace in body | `INTERNAL` |
 
 - **Error types.** A single `AppError(httpStatus, code, message, details?)`. Prisma unique-violation (`P2002`) on the partial indexes is translated to the matching 409 code; Postgres deadlock / serialization errors map to `409 CONFLICT_RETRY`.
-- **Logging.** pino JSON logs, one line per request (method, path, status, latency, `requestId`, `userId`), plus info-level domain events (`pool.created`, `request.matched`, `seat_claim.rejected`). `authorization` header and `password` fields redacted.
+- **Logging.** pino JSON logs, one line per request (method, path, status, latency, `requestId`, `userId`), plus info-level domain events (`pool.created`, `request.matched`, `seat_claim.rejected`). `authorization` and `cookie` request headers, the `set-cookie` response header and `password` fields redacted, so session tokens never reach the logs.
 
 ### 6.6 Security baseline
 
@@ -719,6 +723,8 @@ Example, passenger cancel of a matched request:
 | R-18 | Concurrency test passing by luck | Repeat 25×; show it failing against the naive version first | I-CON-01 |
 | R-19 | Seed not idempotent, breaks `docker compose up` on restart | Upserts keyed by email / vehicle name | I-SEED-01 |
 | R-20 | Tests sharing DB state and interfering | Dedicated test DB, reset per file, serial test files | CI |
+| R-22 | Rate limiter keyed by the wrong IP or reset per instance | Behind the Next.js proxy every request would share the proxy's IP: Phase 12 sets Express `trust proxy` to exactly the proxy hop (never "trust everything", which lets clients fake their IP). The in-memory counter is per process; more than one API instance needs a shared store (`docs/scaling.md`) | I-AUTH-07 |
+| R-23 | Known vulnerabilities in dependencies | `npm audit` reports 4 high advisories, all inside the Prisma **CLI** (`mysql2`, `deepmerge-ts`), not in code the API runs; `mysql2` is never used with PostgreSQL. `npm audit fix --force` would downgrade to Prisma 6, so it is not applied. Re-checked at the release audit | Release checklist |
 
 ### 12.2 Test catalogue
 
@@ -726,6 +732,10 @@ Example, passenger cancel of a matched request:
 
 | ID | Asserts |
 |---|---|
+| U-ENV-01 | Settings: safe defaults; refuses a missing/short `JWT_SECRET`, the example secret in production, a non-web `FRONTEND_ORIGIN` and a `BCRYPT_COST` outside 4 to 15 |
+| U-AUTH-01 | Session tokens: sign/verify round trip; only `sub`, `role`, `iat`, `exp` inside; wrong secret, tampered, expired, unsigned (`alg: none`) and unexpected content all refused with the same 401; cookie options |
+| U-AUTH-02 | Passwords: never stored in plain text, cost recorded in the hash, wrong password rejected, every hash salted |
+| U-LOG-01 | Logs never contain session cookies, auth headers or passwords |
 | U-FARE-01 | Solo: Nusrat 12500, Rafiq 15000 |
 | U-FARE-02 | Pooled: Nusrat 10000, Rafiq 12000; no discount when only one request |
 | U-FARE-03 | Multi-seat: Rafiq 2 seats pooled 24000; a lone 2-seat request gets no discount |
@@ -745,12 +755,15 @@ Example, passenger cancel of a matched request:
 | I-HEALTH-01 | `/health` returns `{status: "ok", database: "ok"}` with helmet headers and an `x-request-id` |
 | I-HEALTH-02 | `/health` returns 503 `{status: "error", database: "unreachable"}` when the database is down |
 | I-SEED-01 | Seed creates the cast; Bullet capacity 3; passwords stored as bcrypt hashes; re-running seed changes nothing |
-| I-AUTH-01 | Register + login return a token; Jashim can log in |
-| I-AUTH-02 | Wrong password and unknown email both → 401 with the same message |
+| I-AUTH-01 | Nusrat signs up as a passenger and is signed in (session cookie, `/auth/me`); only a bcrypt hash is stored; Jashim signs in as a driver |
+| I-AUTH-02 | Wrong password and unknown email both → 401 with the same body and no cookie; a password matching only in its first 72 bytes is refused |
 | I-AUTH-03 | `register` with `role: "DRIVER"` still creates a passenger |
-| I-AUTH-04 | Passenger on driver routes → 403; driver on `POST /rides` → 403 |
+| I-AUTH-04 | Passenger on a driver-only route → 403 and a driver on a passenger-only route → 403; no session → 401 first (middleware test now; repeated on the real routes in Phases 6 and 10) |
 | I-AUTH-05 | Missing, expired or tampered session cookie → 401 |
-| I-AUTH-06 | State-changing request with a foreign `Origin` → 403; login sets an httpOnly cookie |
+| I-AUTH-06 | State-changing request with a foreign or missing `Origin` → 403; login sets an httpOnly, `SameSite=Lax`, 8-hour cookie, `Secure` in production |
+| I-AUTH-07 | After `AUTH_RATE_LIMIT_MAX` attempts, login and register from the same address → 429 with `RateLimit` headers, even with the right password |
+| I-AUTH-08 | Sign-up validation: every invalid field explained (400); email stored trimmed and lowercase; duplicate email in any capitals → 409 `EMAIL_TAKEN`; passwords over 72 bytes refused |
+| I-AUTH-09 | Logout expires the cookie; the same browser is then signed out |
 | I-AUTHZ-01 | Rafiq cannot GET or cancel Nusrat's ride (404) and her ride is unchanged |
 | I-AUTHZ-02 | Test-fixture driver cannot arrive/start/complete/cancel Jashim's pool (404) |
 | I-AUTHZ-03 | Nusrat's ride response contains no co-rider names, destinations or fares |

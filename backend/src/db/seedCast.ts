@@ -1,5 +1,5 @@
-import bcrypt from 'bcrypt';
 import type { PrismaClient } from '../lib/prisma.js';
+import { hashPassword } from '../modules/auth/password.js';
 
 /**
  * Demo password for every seeded account. It is printed in the README as demo credentials,
@@ -17,16 +17,15 @@ export const CAST = {
   ],
 } as const;
 
-/** bcrypt "cost": how many rounds of hashing. Higher = slower to crack, slower to compute. */
-const BCRYPT_COST = 10;
-
 /**
  * Creates (or updates) Jashim, Bullet, Nusrat, Rafiq and Shirin.
  * Idempotent: running it twice leaves exactly the same data, because every write is an
  * "upsert" (update if it exists, insert if it does not), keyed by email or driver.
  */
-export async function seedCast(prisma: PrismaClient): Promise<void> {
-  const passwordHash = await bcrypt.hash(DEMO_PASSWORD, BCRYPT_COST);
+export async function seedCast(prisma: PrismaClient, options: { bcryptCost: number }): Promise<void> {
+  // Hashed once and shared by the four demo accounts (fine for demo data; real sign-ups
+  // hash every password separately, so each gets its own salt).
+  const passwordHash = await hashPassword(DEMO_PASSWORD, options.bcryptCost);
 
   // A transaction: either the whole cast is saved, or none of it is.
   await prisma.$transaction(async (tx) => {

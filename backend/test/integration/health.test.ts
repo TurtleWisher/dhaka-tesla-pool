@@ -1,14 +1,11 @@
 import request from 'supertest';
 import { afterAll, describe, expect, it } from 'vitest';
-import { createApp } from '../../src/app.js';
-import { createLogger } from '../../src/lib/logger.js';
 import { createPrismaClient } from '../../src/lib/prisma.js';
+import { createTestApp } from '../helpers/app.js';
 import { createTestPrisma } from '../helpers/db.js';
 
-// A silent logger keeps test output readable.
-const logger = createLogger('silent');
 const prisma = createTestPrisma();
-const app = createApp({ logger, prisma });
+const app = createTestApp(prisma);
 
 afterAll(async () => {
   await prisma.$disconnect();
@@ -33,7 +30,7 @@ describe('GET /health', () => {
   it('[I-HEALTH-02] returns 503 when the database cannot be reached', async () => {
     // Port 1 on localhost: nothing listens there, so every connection fails immediately.
     const unreachable = createPrismaClient('postgresql://nobody:nothing@localhost:1/nowhere');
-    const brokenApp = createApp({ logger, prisma: unreachable });
+    const brokenApp = createTestApp(unreachable);
 
     const res = await request(brokenApp).get('/health');
 

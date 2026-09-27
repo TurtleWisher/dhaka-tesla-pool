@@ -53,6 +53,22 @@ npm install
 npm run dev
 ```
 
+Already have a `.env` from an earlier version? Compare it with `.env.example` and copy any new lines: the API refuses to start without a valid `JWT_SECRET`.
+
+### Settings
+
+All settings live in the root `.env` (template: [`.env.example`](.env.example)) and are validated when the API starts.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `DATABASE_URL` | none (required) | Development database |
+| `TEST_DATABASE_URL` | none (required for tests) | Separate database for automated tests |
+| `JWT_SECRET` | none (required, 32+ characters) | Signs session tokens. The example value is refused in production |
+| `FRONTEND_ORIGIN` | `http://localhost:3000` | The only origin allowed to send POST requests |
+| `BCRYPT_COST` | `12` | Password hashing cost (4 to 15) |
+| `AUTH_RATE_LIMIT_MAX` | `10` | Login/register attempts per IP address per 15 minutes |
+| `PORT`, `LOG_LEVEL` | `4000`, `info` | API port and log detail |
+
 ## Database
 
 PostgreSQL 17 (Docker) accessed through Prisma 7. The schema is in [`backend/prisma/schema.prisma`](backend/prisma/schema.prisma); the ERD and the reasoning for every table are in [`docs/architecture.md` §7](docs/architecture.md#7-database-design-and-erd).
@@ -78,11 +94,45 @@ All seeded accounts use the password `TeslaPool#2026` (demo only).
 | Rafiq | Passenger | `rafiq@teslapool.test` |
 | Shirin | Passenger | `shirin@teslapool.test` |
 
+## API
+
+All endpoints live under `/api/v1` (health check: `GET /health`). Errors always have the same shape: `{ "error": { "code": "...", "message": "...", "details"?: {...} } }`.
+
+### Authentication
+
+| Method | Path | Who | What it does |
+|---|---|---|---|
+| POST | `/api/v1/auth/register` | anyone | Creates a **passenger** account (`name`, `email`, `password`) and signs in. Any `role` sent is ignored |
+| POST | `/api/v1/auth/login` | anyone | Signs in a passenger or a driver (`email`, `password`) |
+| POST | `/api/v1/auth/logout` | anyone | Signs out (expires the cookie) |
+| GET | `/api/v1/auth/me` | signed in | The current user: `id`, `name`, `email`, `role` |
+
+Signing in sets a `dtp_session` cookie: **httpOnly** (page scripts cannot read it), **SameSite=Lax**, valid for 8 hours, and **Secure** in production. It holds a signed token with the user id and role only. Passwords are stored only as bcrypt hashes.
+
+| Status | Code | When |
+|---|---|---|
+| 400 | `VALIDATION_ERROR` | A field is missing or invalid; `details` names each field. Passwords need 8 characters to 72 bytes |
+| 401 | `INVALID_CREDENTIALS` | Wrong email **or** password (the same answer for both, on purpose) |
+| 401 | `UNAUTHENTICATED` | No session, or an invalid or expired one |
+| 403 | `BAD_ORIGIN` | A POST that did not come from the web app (`FRONTEND_ORIGIN`) |
+| 409 | `EMAIL_TAKEN` | Registering an email that already has an account |
+| 429 | `RATE_LIMITED` | Too many login/register attempts from one address (10 per 15 minutes by default) |
+
+Try it with `curl`. POST requests must carry the web app's `Origin` header, exactly like a browser would:
+
+```bash
+curl -i -c cookies.txt -H "Origin: http://localhost:3000" -H "Content-Type: application/json" \
+  -d '{"email":"jashim@teslapool.test","password":"TeslaPool#2026"}' \
+  http://localhost:4000/api/v1/auth/login
+
+curl -b cookies.txt http://localhost:4000/api/v1/auth/me
+```
+
 ## Tests
 
 ```bash
 cd backend
-npm test            # Vitest + Supertest, against a separate test database
+npm test            # unit tests (pure functions) + integration tests (Supertest, separate test database)
 npm run typecheck   # TypeScript, no output means no errors
 ```
 

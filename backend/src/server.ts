@@ -6,7 +6,7 @@ import { createPrismaClient } from './lib/prisma.js';
 const env = loadEnv();
 const logger = createLogger(env.LOG_LEVEL);
 const prisma = createPrismaClient(env.DATABASE_URL);
-const app = createApp({ logger, prisma });
+const app = createApp({ logger, prisma, config: env });
 
 const server = app.listen(env.PORT, (error?: Error) => {
   if (error) {

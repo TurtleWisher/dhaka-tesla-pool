@@ -26,6 +26,12 @@
 | 2026-09-26 | Database | Claude | Write partial unique indexes as `status IN (...)` | **Changed** to `status = 'A' OR status = 'B'` | Testing showed PostgreSQL rewrites `IN` into `= ANY (ARRAY[...])`, so Prisma saw drift and tried to recreate the indexes on every migration |
 | 2026-09-26 | Database | Claude | Use `prisma migrate diff --from-migrations` in CI | **Changed** to `migrate deploy` + `--from-config-datasource` diff | The first form needs an extra shadow database in Prisma 7 |
 | 2026-09-26 | Database | Claude | Keep the seed logic in `src/db/seedCast.ts`, with `prisma/seed.ts` as a thin entry point | Accepted | Tests can call the same seed function directly |
+| 2026-09-27 | Auth | Claude | Sign session tokens with `jose` | **Changed** by me to `jsonwebtoken` | The most widely known Node JWT library; easier to recognise and discuss |
+| 2026-09-27 | Auth | Claude | Validate request bodies with a `validate(schema)` middleware, as first written in the design | **Changed** to a `parseBody(schema, req.body)` helper called in each handler | Same checks, but TypeScript knows the validated type without an `as` cast |
+| 2026-09-27 | Auth | Claude | Also refuse login passwords longer than 72 bytes | Accepted | bcrypt ignores bytes after 72, so a longer string could otherwise match; covered by I-AUTH-02 |
+| 2026-09-27 | Auth | Claude | Refuse to start in production with the `.env.example` JWT secret | Accepted | The example value is public on GitHub |
+| 2026-09-27 | Logging | Claude | Redact the `set-cookie` response header | Accepted | The Phase 4 request logs showed pino-http writing response headers, so login would have logged session tokens; covered by U-LOG-01 |
+| 2026-09-27 | Dependencies | Claude | Do not run `npm audit fix --force` for the 4 high advisories | Accepted | All four are inside the Prisma CLI (`mysql2`, `deepmerge-ts`), not in code the API runs; the forced fix would downgrade Prisma to version 6 (R-23) |
 
 ## Candidates for the README
 
