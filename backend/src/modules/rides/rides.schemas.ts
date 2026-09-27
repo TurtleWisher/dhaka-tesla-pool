@@ -18,3 +18,13 @@ export const EstimateQuery = z
   .refine((q) => q.pickup !== q.dropoff, { message: SAME_ZONE, path: ['dropoff'] })
   .transform((q) => ({ pickupZone: q.pickup, dropoffZone: q.dropoff, seats: q.seats }));
 export type EstimateInput = z.infer<typeof EstimateQuery>;
+
+/** POST /rides: what a passenger sends to request a ride. */
+export const CreateRideBody = z
+  .object({
+    pickupZone: ZoneSchema,
+    dropoffZone: ZoneSchema,
+    seats: z.number({ error: SEATS }).int(SEATS).min(1, SEATS).max(3, SEATS).default(1),
+  })
+  .refine((ride) => ride.pickupZone !== ride.dropoffZone, { message: SAME_ZONE, path: ['dropoffZone'] });
+export type CreateRideInput = z.infer<typeof CreateRideBody>;
