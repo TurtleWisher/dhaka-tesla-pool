@@ -1,12 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import {
+  ACTIVE_POOL_STATUSES,
   ACTIVE_REQUEST_STATUSES,
+  POOL_STATUSES,
   REQUEST_STATUSES,
   type RequestStatus,
   canTransition,
   isFinal,
 } from '../../src/domain/rideStateMachine.js';
-import { RequestStatus as DatabaseRequestStatus } from '../../src/generated/prisma/enums.js';
+import {
+  PoolStatus as DatabasePoolStatus,
+  RequestStatus as DatabaseRequestStatus,
+} from '../../src/generated/prisma/enums.js';
 
 /** The allowed changes, written out independently from the code (docs/architecture.md §8.3). */
 const ALLOWED: ReadonlyArray<[RequestStatus, RequestStatus]> = [
@@ -56,5 +61,14 @@ describe('ride request state machine', () => {
   it('[U-SM-02] counts a ride as active until it is completed or cancelled', () => {
     // Same list as the database's "one active request per passenger" index (Phase 4).
     expect(ACTIVE_REQUEST_STATUSES).toEqual(['REQUESTED', 'MATCHED', 'IN_PROGRESS']);
+  });
+
+  it('[U-SM-01] knows exactly the pool statuses the database knows', () => {
+    expect([...POOL_STATUSES].sort()).toEqual(Object.values(DatabasePoolStatus).sort());
+  });
+
+  it('[U-SM-02] counts a pool as occupying its vehicle until it is completed or cancelled', () => {
+    // Same list as the database's "one active pool per vehicle" index (Phase 4).
+    expect(ACTIVE_POOL_STATUSES).toEqual(['ACCEPTED', 'DRIVER_ARRIVED', 'STARTED']);
   });
 });
