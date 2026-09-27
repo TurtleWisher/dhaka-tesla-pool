@@ -229,7 +229,7 @@ flowchart TB
 | 401 | No/invalid/expired token, bad credentials | `UNAUTHENTICATED`, `INVALID_CREDENTIALS` |
 | 403 | Wrong role, or a state-changing request from another origin | `FORBIDDEN_ROLE`, `BAD_ORIGIN` |
 | 404 | Missing or not yours | `NOT_FOUND` |
-| 409 | Business-rule or state conflict | `EMAIL_TAKEN`, `INVALID_TRANSITION`, `ACTIVE_REQUEST_EXISTS`, `REQUEST_ALREADY_MATCHED`, `RIDE_ALREADY_STARTED`, `DRIVER_OFFLINE`, `ACTIVE_POOL_EXISTS`, `SEATS_UNAVAILABLE` |
+| 409 | Business-rule or state conflict | `EMAIL_TAKEN`, `INVALID_TRANSITION`, `ACTIVE_REQUEST_EXISTS`, `REQUEST_ALREADY_MATCHED`, `REQUEST_INCOMPATIBLE`, `RIDE_ALREADY_STARTED`, `DRIVER_OFFLINE`, `ACTIVE_POOL_EXISTS`, `SEATS_UNAVAILABLE`, `CONFLICT_RETRY` |
 | 429 | Rate limit | `RATE_LIMITED` |
 | 500 | Anything unexpected; no stack trace in body | `INTERNAL` |
 
@@ -459,7 +459,7 @@ stateDiagram-v2
 | Who | Request / pool state | Allowed? | Result |
 |---|---|---|---|
 | Passenger (own) | `REQUESTED` | Yes | Request `CANCELLED` |
-| Passenger (own) | `MATCHED`, pool `ACCEPTED` or `DRIVER_ARRIVED` | Yes (built with pooling, Phase 7) | Request `CANCELLED`, member `LEFT`, seats released; if pool now empty → pool `CANCELLED` |
+| Passenger (own) | `MATCHED`, pool `ACCEPTED` or `DRIVER_ARRIVED` | Yes | Request `CANCELLED`, member `LEFT`, seats released; if pool now empty → pool `CANCELLED` |
 | Passenger (own) | `IN_PROGRESS` / `COMPLETED` / `CANCELLED` | No | `409 RIDE_ALREADY_STARTED` / `INVALID_TRANSITION` |
 | Passenger (other's) | any | No | `404` |
 | Driver (own pool) | `ACCEPTED`, `DRIVER_ARRIVED` | Yes | Pool `CANCELLED`, members `REMOVED`, requests re-queued to `REQUESTED` |
@@ -518,13 +518,15 @@ canJoin(request, pool) =
 
 ### 9.3 Where matching runs
 
-All three entry points call one service function, `assignRequestToPool(tx, requestId, poolId)`, which performs the atomic claim (§11). Nothing else changes `seats_available` except its twin `releaseSeats`.
+All three entry points call one function, `assignRequestToPool(tx, poolId, request, actor)` in `modules/pools/seatClaim.ts`, which performs the atomic claim (§11). Nothing else changes `seats_available` except its twin `releaseSeats`.
 
 | Trigger | Behaviour |
 |---|---|
-| `POST /rides` | Insert request (`REQUESTED`). Find joinable pools (same pickup zone, `ACCEPTED`, enough seats, oldest first), filter with `canJoin`, try to claim the first. If none, stay `REQUESTED`. |
-| `POST /driver/requests/:id/accept` | Driver has no active pool: create pool, claim seats for this request, then **sweep**. Driver has an `ACCEPTED` pool: `canJoin` must pass, then claim. |
-| Sweep (after pool creation) | Load waiting requests in the pool's pickup zone, oldest first; for each, if `canJoin`, claim; stop when full. |
+| `POST /rides` | In the **same transaction** as the insert: find open pools (same pickup zone, `ACCEPTED`, enough seats, oldest first, up to 10) and try the claim on each until one succeeds. If none, stay `REQUESTED`. |
+| `POST /driver/requests/:id/accept` | Driver must be online. No active pool: create pool, claim seats for this request, then **sweep**. Driver has an `ACCEPTED` pool: claim (which applies `canJoin`). A locked roster (`DRIVER_ARRIVED`, `STARTED`) → `409 ACTIVE_POOL_EXISTS`. |
+| Sweep (after pool creation) | Load waiting requests in the pool's pickup zone, oldest first (up to 50); claim each one that fits in the seats left; stop when full. |
+
+**As built (Phase 7).** The claim applies `canJoin` itself, *after* its first statement has locked the pool row. While the lock is held nobody else can join, so the rider list it checks is final. Checking before the claim would let two riders who are each within 3 km of the current riders, but 4 km from each other, both join at the same moment. Callers only pre-filter candidates by zone, status and seats.
 
 ### 9.4 Relevant requests for the driver (A-16)
 
@@ -655,7 +657,9 @@ INSERT INTO ride_events (...) VALUES (...);
 COMMIT;
 ```
 
-In Prisma, step 1 is `tx.pool.updateMany({ where: { id, status: 'ACCEPTED', seatsAvailable: { gte: seats } }, data: { seatsAvailable: { decrement: seats } } })`, and `count === 0` throws, rolling back the interactive transaction.
+In Prisma, step 1 is `tx.pool.updateMany({ where: { id, status: 'ACCEPTED', seatsAvailable: { gte: seats } }, data: { seatsAvailable: { decrement: seats } } })`.
+
+**As built.** Between steps 1 and 2 the claim re-reads the pool's active riders and applies `canJoin` while holding the lock (§9.3). If that fails, or step 2 matches 0 rows, it gives the seats back (`increment`, still under the lock) and returns why (`NO_SEATS`, `INCOMPATIBLE`, `REQUEST_TAKEN`) instead of throwing, so auto-match and the sweep can try the next candidate inside the same transaction. The accept endpoint turns a refusal into a `409` and rolls back.
 
 ### 11.5 Why it works: the timeline
 
@@ -673,13 +677,15 @@ If a code bug ever skipped the `WHERE` guard, the `CHECK (seats_available >= 0)`
 
 ### 11.6 Lock ordering (D-12)
 
-Every transaction that touches both a pool and a request locks the **pool row first, then request rows**. This applies to join, passenger cancel, driver cancel, start and complete. With a single global order, two transactions cannot each hold what the other needs, so deadlocks should not occur. If Postgres still aborts a transaction (`40P01` deadlock or `40001` serialization), the API returns `409 CONFLICT_RETRY` and the client can retry.
+Every transaction that touches both a pool and a request locks the **pool row first, then request rows**. This applies to join, passenger cancel, driver cancel, start and complete. Accept and go-offline first write the **driver's own row** (driver → pool → requests), so one driver's accepts run one after another (a double tap gives one pool) and going offline cannot slip in between accept's online check and its new pool. With a single global order, two transactions cannot each hold what the other needs, so deadlocks should not occur. If Postgres still aborts a transaction (`40P01` deadlock or `40001` serialization), the API returns `409 CONFLICT_RETRY` and the client can retry.
 
 Example, passenger cancel of a matched request:
 1. Read membership (no lock) to find the pool.
-2. `UPDATE pools SET seats_available = seats_available + n WHERE id = P AND status IN ('ACCEPTED','DRIVER_ARRIVED')`; 0 rows → pool already started → `409 RIDE_ALREADY_STARTED`.
-3. `UPDATE ride_requests SET status = 'CANCELLED' WHERE id = R AND status = 'MATCHED'`; 0 rows → state changed underneath → roll back, `409 CONFLICT_RETRY`.
-4. Member → `LEFT`, event. If `seats_available = capacity` now, pool → `CANCELLED`.
+2. `UPDATE pools SET seats_available = seats_available + n WHERE id = P AND status IN ('ACCEPTED','DRIVER_ARRIVED')` (`releaseSeats`).
+3. `UPDATE ride_requests SET status = 'CANCELLED' WHERE id = R AND status = 'MATCHED'`.
+4. Member → `LEFT`, event. If no active members remain, pool → `CANCELLED` with a `POOL_CANCELLED` event (the system is the actor).
+
+If step 2 or 3 changes 0 rows, the transaction is rolled back and the ride is re-read to choose the answer: `CANCELLED` → `409 INVALID_TRANSITION` (a double click), `IN_PROGRESS` → `409 RIDE_ALREADY_STARTED`, still `REQUESTED` or `MATCHED` → `409 CONFLICT_RETRY`.
 
 ### 11.7 Other races handled by the same ideas
 
@@ -742,11 +748,11 @@ Example, passenger cancel of a matched request:
 | U-FARE-02 | Pooled: Nusrat 10000, Rafiq 12000; no discount when only one request |
 | U-FARE-03 | Multi-seat: Rafiq 2 seats pooled 24000; a lone 2-seat request gets no discount |
 | U-FARE-04 | `divRoundHalfUp` edge cases; rejects negative and non-integer inputs; breakdown always sums |
-| U-SM-01 | Every allowed transition is accepted; the statuses match the database enum (request table now, pool table with the driver flow) |
-| U-SM-02 | Every other (from, to) pair in the full cross product is rejected; final statuses; the active-status list matches the partial unique index |
+| U-SM-01 | Every allowed transition is accepted; request and pool statuses match the database enums (the pool transition table comes with the driver flow) |
+| U-SM-02 | Every other (from, to) pair in the full cross product is rejected; final statuses; the active request and active pool lists match their partial unique indexes |
 | U-MATCH-01 | Nusrat + Rafiq compatible |
 | U-MATCH-02 | Different pickup zone → incompatible |
-| U-MATCH-03 | Banani → Gulshan 2 joins {Rafiq} but not {Nusrat, Rafiq} |
+| U-MATCH-03 | Banani → Gulshan 2 joins {Rafiq} but not {Nusrat, Rafiq}; exactly 3 km allowed, 4 km refused |
 | U-MATCH-04 | Not enough seats → incompatible; non-`ACCEPTED` pool → incompatible |
 | U-MATCH-05 | Distance table symmetric, zero diagonal, triangle inequality holds; zones match the database enum; story distances |
 
@@ -777,11 +783,15 @@ Example, passenger cancel of a matched request:
 | I-RIDE-05 | `GET /rides/current` is null, then the active ride, and only ever the caller's own |
 | I-RIDE-06 | History pages newest first with `nextCursor`; a ride added between pages causes no repeat or skip; bad `limit`/`cursor` (including another passenger's ride id) → 400 |
 | I-RIDE-07 | `GET /rides/:id` returns the ride with its event timeline |
-| I-POOL-01 | Story: Jashim accepts Nusrat; Rafiq auto-joins; Shirin takes the last seat |
+| I-POOL-01 | Story: Jashim accepts Nusrat; Rafiq auto-joins; Shirin takes the last seat. Accept: joins an open pool or `409 REQUEST_INCOMPATIBLE`; a double tap creates one pool; cancelled, unknown and malformed ids refused; no joins once the roster is locked |
 | I-POOL-02 | Rafiq (2 seats) + Nusrat fill Bullet; Shirin stays `REQUESTED` |
 | I-POOL-03 | Shirin → Gulshan 2 does not join a pool containing Nusrat |
 | I-POOL-04 | Invariant helper after every pool scenario: `seats_available = capacity − Σ active seats` |
 | I-POOL-05 | Sweep: Nusrat and Rafiq waiting; Jashim accepts Nusrat; Rafiq is pulled in |
+| I-CLAIM-01 | The seat claim places a waiting request: seats taken, `MATCHED`, member row, `REQUEST_MATCHED` event |
+| I-CLAIM-02 | Not enough free seats, or the pool no longer `ACCEPTED` → nothing changes |
+| I-CLAIM-03 | Drop-off too far or another pickup zone → the seats are given back |
+| I-CLAIM-04 | The request is no longer waiting → the seats are given back |
 | I-CON-01 | Nusrat vs Shirin for the last seat, fired concurrently, repeated 25×: exactly one `MATCHED`, invariant holds |
 | I-CON-02 | Jashim double-accepts Nusrat's request concurrently: one pool, one membership, one 409 |
 | I-CON-03 | Nusrat submits two requests concurrently: one created, one 409 |
@@ -797,7 +807,7 @@ Example, passenger cancel of a matched request:
 | I-LIFE-01 | Happy path arrive → start → complete; request statuses and timestamps follow |
 | I-LIFE-02 | Start before arrive, complete before start, arrive twice, act on completed pool → 409 `INVALID_TRANSITION` |
 | I-CANCEL-01 | Cancel while `REQUESTED`: status, `cancelled_at` and `REQUEST_CANCELLED` event; a double click cancels once; cancelling again → 409 `INVALID_TRANSITION` |
-| I-CANCEL-02 | Rafiq cancels while `MATCHED`: seat released; Nusrat's live estimate loses the discount |
+| I-CANCEL-02 | Rafiq cancels while `MATCHED` (also after the driver arrived): seat released, member `LEFT`, Nusrat still `MATCHED`; a double click releases once. Nusrat's live estimate losing the discount is checked with the fare engine (Phase 9) |
 | I-CANCEL-03 | Cancel after `STARTED` → 409 |
 | I-CANCEL-04 | Last member cancels → pool `CANCELLED`; Jashim can accept again |
 | I-CANCEL-05 | Jashim cancels pool → Nusrat and Rafiq back to `REQUESTED`; events recorded |

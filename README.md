@@ -141,11 +141,11 @@ Fares are ৳50 base plus ৳25 per km, **per seat**, with 20% off when the car 
 
 | Method | Path | What it does |
 |---|---|---|
-| POST | `/api/v1/rides` | Request a ride: `{ "pickupZone": "BANANI", "dropoffZone": "MOHAKHALI", "seats": 1 }` → 201 with the ride (`REQUESTED`, distance, solo estimate) |
+| POST | `/api/v1/rides` | Request a ride: `{ "pickupZone": "BANANI", "dropoffZone": "MOHAKHALI", "seats": 1 }` → 201 with the ride (distance, solo estimate). It is `MATCHED` if it joined an open pool straight away, otherwise `REQUESTED` (waiting) |
 | GET | `/api/v1/rides/current` | Your active ride, or `{ "ride": null }` |
 | GET | `/api/v1/rides?limit=20&cursor=<id>` | Your ride history, newest first. Pass the returned `nextCursor` to get the next page; it is `null` on the last page |
 | GET | `/api/v1/rides/:id` | One of your rides, with its history (`events`) |
-| POST | `/api/v1/rides/:id/cancel` | Cancel your ride while it is still waiting (`REQUESTED`) |
+| POST | `/api/v1/rides/:id/cancel` | Cancel your ride before the trip starts: a waiting ride, or a matched one (its seats go back to the pool; the last rider out cancels the pool) |
 
 | Status | Code | When |
 |---|---|---|
@@ -154,6 +154,7 @@ Fares are ৳50 base plus ৳25 per km, **per seat**, with 20% off when the car 
 | 404 | `NOT_FOUND` | The ride does not exist **or belongs to someone else** (the same answer on purpose) |
 | 409 | `ACTIVE_REQUEST_EXISTS` | You already have an active ride; `details.rideId` says which |
 | 409 | `INVALID_TRANSITION`, `RIDE_ALREADY_STARTED` | The ride can no longer be cancelled |
+| 409 | `CONFLICT_RETRY` | The ride changed while it was being cancelled; try again |
 
 ```bash
 curl -b cookies.txt -H "Origin: http://localhost:3000" -H "Content-Type: application/json" \
@@ -161,6 +162,34 @@ curl -b cookies.txt -H "Origin: http://localhost:3000" -H "Content-Type: applica
 ```
 
 (Log in as a passenger first, e.g. `nusrat@teslapool.test`; drivers get 403.)
+
+### Driver
+
+| Method | Path | What it does |
+|---|---|---|
+| POST | `/api/v1/driver/online` · `/api/v1/driver/offline` | Start or stop taking rides. Going offline is refused while a pool is under way |
+| GET | `/api/v1/driver/requests` | Waiting rides you could take, oldest first: none while offline; all of them with no pool; with an open pool only those that fit it |
+| POST | `/api/v1/driver/requests/:id/accept` | Accept a waiting ride → `{ pool }` with its riders. With no pool under way this creates one on your vehicle and pulls in other waiting riders who fit |
+
+**How pooling works.** A ride joins a pool when it has the same pickup zone, the pool has enough free seats and is still `ACCEPTED` (the roster locks when the driver arrives), and its drop-off is at most 3 km from **every** rider's drop-off already in the car. New rides join an open pool the moment they are requested. Seats are taken by one guarded database update, so two people can never get the last seat.
+
+| Status | Code | When |
+|---|---|---|
+| 403 | `FORBIDDEN_ROLE` | A passenger calling a driver endpoint |
+| 404 | `NOT_FOUND` | No such ride request |
+| 409 | `DRIVER_OFFLINE` | Accepting while offline |
+| 409 | `ACTIVE_POOL_EXISTS` | Going offline with a pool under way, or accepting once the roster is locked |
+| 409 | `REQUEST_ALREADY_MATCHED` | The ride is already in a pool (including a double tap on Accept) |
+| 409 | `REQUEST_INCOMPATIBLE`, `SEATS_UNAVAILABLE` | The ride does not fit your open pool |
+| 409 | `INVALID_TRANSITION` | The ride was cancelled |
+
+```bash
+curl -b driver.txt -X POST -H "Origin: http://localhost:3000" http://localhost:4000/api/v1/driver/online
+curl -b driver.txt http://localhost:4000/api/v1/driver/requests
+curl -b driver.txt -X POST -H "Origin: http://localhost:3000" http://localhost:4000/api/v1/driver/requests/<id>/accept
+```
+
+(Log in as `jashim@teslapool.test` first and save his cookie in `driver.txt`.)
 
 ## Tests
 
