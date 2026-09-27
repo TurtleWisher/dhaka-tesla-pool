@@ -36,6 +36,12 @@
 | 2026-09-27 | Rides | Claude | Use the ride id as the cursor (Prisma cursor pagination) instead of encoding `created_at` in it | Accepted | `created_at` is stored to the microsecond but a JavaScript `Date` keeps only milliseconds, so a timestamp cursor could skip rides |
 | 2026-09-27 | Domain | Claude | Keep zone and status lists in `domain/` (no Prisma import) with a unit test that they match the database enums | Accepted | The business rules stay free of database code, and the test catches the two lists drifting apart |
 | 2026-09-27 | Rides | Claude | Cancel as one conditional update (`WHERE status = 'REQUESTED'`) instead of "read, check, then write" | Accepted | Two cancel clicks racing each other cannot both succeed; covered by a double-click test |
+| 2026-09-27 | Driver | Claude | Bring online/offline and the relevant-request list into the pooling phase, with accept | Accepted by me | Accepting needs an online driver (A-15) and a list to choose from; arrive, start, complete and driver cancel stay with the driver flow |
+| 2026-09-27 | Pooling | Claude | Build the atomic seat claim now and add the race tests in the concurrency phase | Accepted by me over "simple version first, fix later" | `master` never contains a known overbooking bug |
+| 2026-09-27 | Pooling | Claude | Auto-match in the same transaction as the booking | Accepted by me over a second transaction | The passenger gets `REQUESTED` or `MATCHED` in one all-or-nothing step, never a half state |
+| 2026-09-27 | Pooling | Claude | Apply `canJoin` inside the seat claim, after the pool row is locked, instead of before it | Accepted | Checking first leaves a gap: two riders each close to the current riders but 4 km from each other could both join at once |
+| 2026-09-27 | Driver | Claude | Accept and go-offline write the driver's own row first | Accepted | Serialises one driver's accepts (a double tap gives one pool) and stops going offline between accept's online check and its new pool |
+| 2026-09-27 | Errors | Claude | Add `409 REQUEST_INCOMPATIBLE` for accepting a ride that fails the pooling rule | Accepted | None of the documented codes described this case |
 
 ## Candidates for the README
 

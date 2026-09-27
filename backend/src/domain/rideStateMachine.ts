@@ -2,7 +2,7 @@
  * Which status changes a ride request may make (docs/architecture.md §8.3). Pure: no database.
  * The service still performs each change as a conditional update ("... WHERE status = <from>"),
  * so two requests racing to change the same ride cannot both succeed (D-08).
- * The pool's own lifecycle is added with the driver flow.
+ * The pool statuses are here too; the pool's transition table is added with the driver flow.
  */
 
 export const REQUEST_STATUSES = ['REQUESTED', 'MATCHED', 'IN_PROGRESS', 'COMPLETED', 'CANCELLED'] as const;
@@ -35,3 +35,14 @@ export function isFinal(status: RequestStatus): boolean {
 export const ACTIVE_REQUEST_STATUSES: readonly RequestStatus[] = REQUEST_STATUSES.filter(
   (status) => !isFinal(status),
 );
+
+/** A pool's statuses (§8.2). Its transition table is added with the driver flow. */
+export const POOL_STATUSES = ['ACCEPTED', 'DRIVER_ARRIVED', 'STARTED', 'COMPLETED', 'CANCELLED'] as const;
+
+export type PoolStatus = (typeof POOL_STATUSES)[number];
+
+/**
+ * Statuses in which a pool still occupies its vehicle: at most one such pool per vehicle (A-14).
+ * Must match the partial unique index `pools_one_active_per_vehicle`.
+ */
+export const ACTIVE_POOL_STATUSES: readonly PoolStatus[] = ['ACCEPTED', 'DRIVER_ARRIVED', 'STARTED'];
