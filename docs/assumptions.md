@@ -218,3 +218,11 @@ Polling every 5 seconds on active-ride screens only; manual refresh elsewhere. N
 - **Alternatives.** Discount scaling with number of riders; fixed-amount discount.
 - **Why this fits.** Whole-taka pooled fares make the hand check instant for an evaluator.
 - **Would change if.** Real pricing data. Constants live in one config module and each locked fare stores its breakdown, so changing them never rewrites history.
+
+## A-30 · Sign-up rules
+
+- **Assumption.** Name (1 to 80 characters), email and password. Emails are trimmed and stored in lowercase, so `Nusrat@TeslaPool.test` and `nusrat@teslapool.test` are the same account. Passwords need at least 8 characters and at most 72 bytes (bcrypt's limit). Registering an email that already exists returns `409 EMAIL_TAKEN` with the message "This email is already registered".
+- **Alternatives.** Answering "check your email" for both new and existing addresses, which hides whether an account exists.
+- **Why this fits.** There is no email sending in the MVP, so a hidden answer would leave a user unable to find out why they cannot sign in. Revealing that an email is registered is common practice; the rate limit on `/auth/register` stops anyone checking addresses in bulk. Login, where probing matters more, never reveals it.
+- **Would change if.** Email verification is added: then sign-up can always answer "check your inbox".
+- **Tests.** I-AUTH-08 (validation, lowercase email, duplicate email), I-AUTH-07 (rate limit).
