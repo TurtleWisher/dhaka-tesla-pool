@@ -6,11 +6,16 @@ import type { Logger } from 'pino';
 import { pinoHttp } from 'pino-http';
 import type { AppConfig } from './config/env.js';
 import type { PrismaClient } from './lib/prisma.js';
+import { authenticate, requireRole } from './middleware/authenticate.js';
 import { errorHandler, notFound } from './middleware/errorHandler.js';
 import { originCheck } from './middleware/originCheck.js';
 import { createAuthRouter } from './modules/auth/auth.routes.js';
 import { createAuthService } from './modules/auth/auth.service.js';
+import { createFaresRouter } from './modules/fares/fares.routes.js';
 import { createHealthRouter } from './modules/health/health.routes.js';
+import { createRidesRouter } from './modules/rides/rides.routes.js';
+import { createRidesService } from './modules/rides/rides.service.js';
+import { createZonesRouter } from './modules/zones/zones.routes.js';
 
 /** Everything the app needs from the outside world, passed in so tests can supply their own. */
 export interface AppDependencies {
@@ -50,10 +55,16 @@ export function createApp({ logger, prisma, config }: AppDependencies): Express 
   // 5. CSRF protection: requests that change something must come from our web app.
   app.use(originCheck(config.FRONTEND_ORIGIN));
 
-  // 6. Routes.
+  // 6. Routes. Who may call what is visible here, in one place.
+  const signedIn = authenticate(config.JWT_SECRET);
+  const passengersOnly = [signedIn, requireRole('PASSENGER')];
+
   app.use(createHealthRouter(prisma));
   const authService = createAuthService(prisma, config.BCRYPT_COST);
   app.use('/api/v1/auth', createAuthRouter({ authService, config }));
+  app.use('/api/v1/zones', signedIn, createZonesRouter());
+  app.use('/api/v1/fares', ...passengersOnly, createFaresRouter());
+  app.use('/api/v1/rides', ...passengersOnly, createRidesRouter(createRidesService(prisma)));
 
   // 7. Nothing matched, then turn every error into a consistent JSON response.
   app.use(notFound);

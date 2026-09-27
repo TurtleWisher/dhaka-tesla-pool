@@ -32,6 +32,10 @@
 | 2026-09-27 | Auth | Claude | Refuse to start in production with the `.env.example` JWT secret | Accepted | The example value is public on GitHub |
 | 2026-09-27 | Logging | Claude | Redact the `set-cookie` response header | Accepted | The Phase 4 request logs showed pino-http writing response headers, so login would have logged session tokens; covered by U-LOG-01 |
 | 2026-09-27 | Dependencies | Claude | Do not run `npm audit fix --force` for the 4 high advisories | Accepted | All four are inside the Prisma CLI (`mysql2`, `deepmerge-ts`), not in code the API runs; the forced fix would downgrade Prisma to version 6 (R-23) |
+| 2026-09-27 | Rides | Claude | Cursor paging for ride history, as in the design | Accepted by me over "latest 50 only" | Stays correct when new rides arrive between page loads (I-RIDE-06) |
+| 2026-09-27 | Rides | Claude | Use the ride id as the cursor (Prisma cursor pagination) instead of encoding `created_at` in it | Accepted | `created_at` is stored to the microsecond but a JavaScript `Date` keeps only milliseconds, so a timestamp cursor could skip rides |
+| 2026-09-27 | Domain | Claude | Keep zone and status lists in `domain/` (no Prisma import) with a unit test that they match the database enums | Accepted | The business rules stay free of database code, and the test catches the two lists drifting apart |
+| 2026-09-27 | Rides | Claude | Cancel as one conditional update (`WHERE status = 'REQUESTED'`) instead of "read, check, then write" | Accepted | Two cancel clicks racing each other cannot both succeed; covered by a double-click test |
 
 ## Candidates for the README
 
