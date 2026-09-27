@@ -11,6 +11,8 @@ import { errorHandler, notFound } from './middleware/errorHandler.js';
 import { originCheck } from './middleware/originCheck.js';
 import { createAuthRouter } from './modules/auth/auth.routes.js';
 import { createAuthService } from './modules/auth/auth.service.js';
+import { createDriverRouter } from './modules/driver/driver.routes.js';
+import { createDriverService } from './modules/driver/driver.service.js';
 import { createFaresRouter } from './modules/fares/fares.routes.js';
 import { createHealthRouter } from './modules/health/health.routes.js';
 import { createRidesRouter } from './modules/rides/rides.routes.js';
@@ -58,6 +60,7 @@ export function createApp({ logger, prisma, config }: AppDependencies): Express 
   // 6. Routes. Who may call what is visible here, in one place.
   const signedIn = authenticate(config.JWT_SECRET);
   const passengersOnly = [signedIn, requireRole('PASSENGER')];
+  const driversOnly = [signedIn, requireRole('DRIVER')];
 
   app.use(createHealthRouter(prisma));
   const authService = createAuthService(prisma, config.BCRYPT_COST);
@@ -65,6 +68,7 @@ export function createApp({ logger, prisma, config }: AppDependencies): Express 
   app.use('/api/v1/zones', signedIn, createZonesRouter());
   app.use('/api/v1/fares', ...passengersOnly, createFaresRouter());
   app.use('/api/v1/rides', ...passengersOnly, createRidesRouter(createRidesService(prisma)));
+  app.use('/api/v1/driver', ...driversOnly, createDriverRouter(createDriverService(prisma)));
 
   // 7. Nothing matched, then turn every error into a consistent JSON response.
   app.use(notFound);
