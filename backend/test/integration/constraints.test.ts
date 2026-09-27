@@ -14,7 +14,7 @@ let nusratId: string;
 
 beforeEach(async () => {
   await resetDatabase(prisma);
-  await seedCast(prisma);
+  await seedCast(prisma, { bcryptCost: 4 });
   const bullet = await prisma.vehicle.findFirstOrThrow({ where: { name: 'Bullet' } });
   const nusrat = await prisma.user.findUniqueOrThrow({ where: { email: 'nusrat@teslapool.test' } });
   vehicleId = bullet.id;
