@@ -1,5 +1,5 @@
 import { calculateFare } from '../../domain/fare.js';
-import { ACTIVE_REQUEST_STATUSES } from '../../domain/rideStateMachine.js';
+import { ACTIVE_REQUEST_STATUSES, type RequestStatus } from '../../domain/rideStateMachine.js';
 import { distanceMetres } from '../../domain/zones.js';
 import { AppError } from '../../lib/errors.js';
 import type { PrismaClient } from '../../lib/prisma.js';
@@ -15,6 +15,17 @@ export interface RideHistoryPage {
 
 /** Missing and "not yours" look exactly the same, so ride ids reveal nothing. */
 const rideNotFound = () => new AppError(404, 'NOT_FOUND', 'Ride not found');
+
+/** Why a ride in this status cannot be cancelled (docs/architecture.md §8.4). */
+function cancelRefused(status: RequestStatus): AppError {
+  if (status === 'IN_PROGRESS') {
+    return new AppError(409, 'RIDE_ALREADY_STARTED', 'Your trip has already started and cannot be cancelled');
+  }
+  return new AppError(409, 'INVALID_TRANSITION', `A ${status.toLowerCase()} ride cannot be cancelled`, {
+    from: status,
+    to: 'CANCELLED',
+  });
+}
 
 /**
  * Ride requests, seen from the passenger. Every query is scoped to `passengerId`, so a passenger
@@ -131,6 +142,46 @@ export function createRidesService(prisma: PrismaClient) {
       }
       const { events, ...row } = ride;
       return { ...toRideView(row), events };
+    },
+
+    /**
+     * Cancels a waiting ride (REQUESTED → CANCELLED) and logs REQUEST_CANCELLED.
+     * The change is one conditional update: "cancel it only if it is still REQUESTED right now".
+     * Two cancel clicks racing each other cannot both succeed; the loser changes 0 rows.
+     * (A MATCHED ride can be cancelled too, but that also frees its seat in the pool, which
+     * arrives together with pooling.)
+     */
+    async cancel(passengerId: string, rideId: string): Promise<RideView> {
+      return prisma.$transaction(async (tx) => {
+        const { count } = await tx.rideRequest.updateMany({
+          where: { id: rideId, passengerId, status: 'REQUESTED' },
+          data: { status: 'CANCELLED', cancelledAt: new Date() },
+        });
+
+        if (count === 0) {
+          // Nothing changed: find out why, to give the right answer.
+          const ride = await tx.rideRequest.findFirst({
+            where: { id: rideId, passengerId },
+            select: { status: true },
+          });
+          throw ride ? cancelRefused(ride.status) : rideNotFound();
+        }
+
+        await tx.rideEvent.create({
+          data: {
+            rideRequestId: rideId,
+            actorUserId: passengerId,
+            type: 'REQUEST_CANCELLED',
+            fromStatus: 'REQUESTED',
+            toStatus: 'CANCELLED',
+          },
+        });
+        const cancelled = await tx.rideRequest.findUniqueOrThrow({
+          where: { id: rideId },
+          select: rideSelect,
+        });
+        return toRideView(cancelled);
+      });
     },
   };
 }

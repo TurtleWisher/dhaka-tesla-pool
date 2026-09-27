@@ -40,5 +40,10 @@ export function createRidesRouter(ridesService: RidesService): Router {
     res.json({ ride });
   });
 
+  router.post('/:id/cancel', async (req, res) => {
+    const ride = await ridesService.cancel(currentUser(req).id, rideIdFrom(req.params.id));
+    res.json({ ride });
+  });
+
   return router;
 }

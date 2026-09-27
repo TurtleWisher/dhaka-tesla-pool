@@ -221,3 +221,83 @@ describe('GET /api/v1/rides/:id', () => {
     }
   });
 });
+
+describe('POST /api/v1/rides/:id/cancel', () => {
+  const cancel = (agent: SignedInAgent, rideId: string) =>
+    agent.post(`/api/v1/rides/${rideId}/cancel`).set('Origin', ORIGIN);
+
+  it('[I-CANCEL-01] cancels a waiting ride, logs it, and lets Nusrat request again', async () => {
+    const ride = (await requestRide(nusrat)).body.ride;
+
+    const res = await cancel(nusrat, ride.id);
+
+    expect(res.status).toBe(200);
+    expect(res.body.ride).toMatchObject({ id: ride.id, status: 'CANCELLED', cancelledAt: expect.any(String) });
+    const detail = await nusrat.get(`/api/v1/rides/${ride.id}`);
+    expect(detail.body.ride.events.map((e: { type: string }) => e.type)).toEqual([
+      'REQUEST_CREATED',
+      'REQUEST_CANCELLED',
+    ]);
+    expect(detail.body.ride.events[1]).toMatchObject({ fromStatus: 'REQUESTED', toStatus: 'CANCELLED' });
+    expect((await nusrat.get('/api/v1/rides/current')).body.ride).toBeNull();
+    expect((await requestRide(nusrat)).status).toBe(201);
+  });
+
+  it('[I-CANCEL-01] a double click cancels once: the second click gets 409 and no second event', async () => {
+    const ride = (await requestRide(nusrat)).body.ride;
+
+    const [a, b] = await Promise.all([cancel(nusrat, ride.id), cancel(nusrat, ride.id)]);
+
+    expect([a.status, b.status].sort()).toEqual([200, 409]);
+    expect(await prisma.rideEvent.count({ where: { type: 'REQUEST_CANCELLED' } })).toBe(1);
+  });
+
+  it('[I-CANCEL-01] refuses to cancel a ride that is already cancelled', async () => {
+    const ride = (await requestRide(nusrat)).body.ride;
+    await cancel(nusrat, ride.id);
+
+    const again = await cancel(nusrat, ride.id);
+
+    expect(again.status).toBe(409);
+    expect(again.body.error).toEqual({
+      code: 'INVALID_TRANSITION',
+      message: 'A cancelled ride cannot be cancelled',
+      details: { from: 'CANCELLED', to: 'CANCELLED' },
+    });
+  });
+
+  it('[I-CANCEL-03] refuses to cancel once the trip has started', async () => {
+    const ride = (await requestRide(nusrat)).body.ride;
+    // The trip-start flow comes with the driver phase; here the database is set directly.
+    await prisma.rideRequest.update({ where: { id: ride.id }, data: { status: 'IN_PROGRESS' } });
+
+    const res = await cancel(nusrat, ride.id);
+
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('RIDE_ALREADY_STARTED');
+    expect((await prisma.rideRequest.findUniqueOrThrow({ where: { id: ride.id } })).status).toBe('IN_PROGRESS');
+  });
+
+  it('[I-AUTHZ-01] Rafiq cannot cancel Nusrat\'s ride, and her ride is unchanged', async () => {
+    const ride = (await requestRide(nusrat)).body.ride;
+
+    const res = await cancel(rafiq, ride.id);
+
+    expect(res.status).toBe(404);
+    expect(res.body.error.code).toBe('NOT_FOUND');
+    const stored = await prisma.rideRequest.findUniqueOrThrow({ where: { id: ride.id } });
+    expect(stored.status).toBe('REQUESTED');
+    expect(await prisma.rideEvent.count({ where: { type: 'REQUEST_CANCELLED' } })).toBe(0);
+  });
+
+  it('[I-AUTH-04] a driver cannot use passenger cancel, and a foreign site cannot either', async () => {
+    const ride = (await requestRide(nusrat)).body.ride;
+
+    const asDriver = await cancel(jashim, ride.id);
+    const foreign = await nusrat.post(`/api/v1/rides/${ride.id}/cancel`).set('Origin', 'https://evil.example');
+
+    expect(asDriver.status).toBe(403);
+    expect(foreign.status).toBe(403);
+    expect((await prisma.rideRequest.findUniqueOrThrow({ where: { id: ride.id } })).status).toBe('REQUESTED');
+  });
+});
