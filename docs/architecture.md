@@ -189,6 +189,8 @@ flowchart TB
 | POST | `/driver/pools/:id/cancel` | driver | Cancel before start, re-queue passengers |
 | GET | `/health` | public | Liveness + DB check (`SELECT 1`) |
 
+**Ride history paging.** `GET /rides` returns `{ rides, nextCursor }`, newest first (`created_at DESC, id DESC`), `limit` 1 to 50 (default 20). The cursor is the **id** of the last ride on the previous page, and Prisma's cursor pagination compares positions inside PostgreSQL. It deliberately does not put the timestamp in the cursor: `created_at` has microsecond precision but a JavaScript `Date` only milliseconds, so a timestamp cursor could skip rides created within the same millisecond. A cursor that is not one of the passenger's own rides is a `400`.
+
 **D-04 · REST with action endpoints**
 - **Decision.** REST resources; each lifecycle transition is its own `POST` action.
 - **Alternatives.** `PATCH /pools/:id {status}`; GraphQL.
@@ -457,7 +459,7 @@ stateDiagram-v2
 | Who | Request / pool state | Allowed? | Result |
 |---|---|---|---|
 | Passenger (own) | `REQUESTED` | Yes | Request `CANCELLED` |
-| Passenger (own) | `MATCHED`, pool `ACCEPTED` or `DRIVER_ARRIVED` | Yes | Request `CANCELLED`, member `LEFT`, seats released; if pool now empty → pool `CANCELLED` |
+| Passenger (own) | `MATCHED`, pool `ACCEPTED` or `DRIVER_ARRIVED` | Yes (built with pooling, Phase 7) | Request `CANCELLED`, member `LEFT`, seats released; if pool now empty → pool `CANCELLED` |
 | Passenger (own) | `IN_PROGRESS` / `COMPLETED` / `CANCELLED` | No | `409 RIDE_ALREADY_STARTED` / `INVALID_TRANSITION` |
 | Passenger (other's) | any | No | `404` |
 | Driver (own pool) | `ACCEPTED`, `DRIVER_ARRIVED` | Yes | Pool `CANCELLED`, members `REMOVED`, requests re-queued to `REQUESTED` |
@@ -467,7 +469,7 @@ stateDiagram-v2
 
 **D-08 · Transitions as conditional updates**
 - **Decision.** Two layers:
-  1. `domain/rideStateMachine.ts` holds the allowed-transition tables and `assertTransition(from, to)`. Pure, exhaustively unit-tested.
+  1. `domain/rideStateMachine.ts` holds the allowed-transition tables with `canTransition(from, to)` and `isFinal(status)`. Pure, exhaustively unit-tested. The ride request table is built first (Phase 6); the pool table is added with the driver flow.
   2. The service executes each transition as `UPDATE ... SET status = <to> WHERE id = $1 AND status = <from> [AND other guards]` and checks the affected row count. 0 rows → re-read to produce the right 404/409.
 - **Alternatives.** Read row, check status in JS, then write (race-prone); Postgres triggers enforcing transitions; a state-machine library (XState).
 - **Why it fits.** The pure table makes rules readable and testable; the conditional update makes them race-safe, because two concurrent "start" calls cannot both match `status = 'DRIVER_ARRIVED'`. Triggers would hide business rules inside the database, which is harder to test and explain; XState is overkill for 5 states.
@@ -740,13 +742,13 @@ Example, passenger cancel of a matched request:
 | U-FARE-02 | Pooled: Nusrat 10000, Rafiq 12000; no discount when only one request |
 | U-FARE-03 | Multi-seat: Rafiq 2 seats pooled 24000; a lone 2-seat request gets no discount |
 | U-FARE-04 | `divRoundHalfUp` edge cases; rejects negative and non-integer inputs; breakdown always sums |
-| U-SM-01 | Every allowed transition (pool and request) is accepted |
-| U-SM-02 | Every other (from, to) pair in the full cross product is rejected |
+| U-SM-01 | Every allowed transition is accepted; the statuses match the database enum (request table now, pool table with the driver flow) |
+| U-SM-02 | Every other (from, to) pair in the full cross product is rejected; final statuses; the active-status list matches the partial unique index |
 | U-MATCH-01 | Nusrat + Rafiq compatible |
 | U-MATCH-02 | Different pickup zone → incompatible |
 | U-MATCH-03 | Banani → Gulshan 2 joins {Rafiq} but not {Nusrat, Rafiq} |
 | U-MATCH-04 | Not enough seats → incompatible; non-`ACCEPTED` pool → incompatible |
-| U-MATCH-05 | Distance table symmetric, zero diagonal, triangle inequality holds |
+| U-MATCH-05 | Distance table symmetric, zero diagonal, triangle inequality holds; zones match the database enum; story distances |
 
 **Integration (Vitest + Supertest, real PostgreSQL)**
 
@@ -764,12 +766,17 @@ Example, passenger cancel of a matched request:
 | I-AUTH-07 | After `AUTH_RATE_LIMIT_MAX` attempts, login and register from the same address → 429 with `RateLimit` headers, even with the right password |
 | I-AUTH-08 | Sign-up validation: every invalid field explained (400); email stored trimmed and lowercase; duplicate email in any capitals → 409 `EMAIL_TAKEN`; passwords over 72 bytes refused |
 | I-AUTH-09 | Logout expires the cookie; the same browser is then signed out |
-| I-AUTHZ-01 | Rafiq cannot GET or cancel Nusrat's ride (404) and her ride is unchanged |
+| I-AUTHZ-01 | Rafiq cannot GET or cancel Nusrat's ride (404, identical to a ride that does not exist) and her ride is unchanged; history and current ride are per passenger |
 | I-AUTHZ-02 | Test-fixture driver cannot arrive/start/complete/cancel Jashim's pool (404) |
 | I-AUTHZ-03 | Nusrat's ride response contains no co-rider names, destinations or fares |
-| I-RIDE-01 | Validation: same pickup/drop-off, seats 0 or 4, unknown zone → 400 |
-| I-RIDE-02 | Second active request → 409 |
-| I-RIDE-03 | Estimate endpoint returns the §10.3 numbers |
+| I-ZONE-01 | `GET /zones` lists the 9 zones with names, for any signed-in user |
+| I-RIDE-01 | Validation: same pickup/drop-off, seats 0, 4, 1.5 or `"2"`, unknown zone → 400 with the field named; nothing stored |
+| I-RIDE-02 | Second active request → 409 `ACTIVE_REQUEST_EXISTS` naming the active ride; a double click creates exactly one ride and one event |
+| I-RIDE-03 | Estimate endpoint returns the §10.3 numbers (Nusrat 12500 / 10000; Rafiq 2 seats 30000 / 24000); drivers get 403 |
+| I-RIDE-04 | Creating a ride stores status `REQUESTED`, `distance_m` and the solo estimate, and logs `REQUEST_CREATED` in the same transaction |
+| I-RIDE-05 | `GET /rides/current` is null, then the active ride, and only ever the caller's own |
+| I-RIDE-06 | History pages newest first with `nextCursor`; a ride added between pages causes no repeat or skip; bad `limit`/`cursor` (including another passenger's ride id) → 400 |
+| I-RIDE-07 | `GET /rides/:id` returns the ride with its event timeline |
 | I-POOL-01 | Story: Jashim accepts Nusrat; Rafiq auto-joins; Shirin takes the last seat |
 | I-POOL-02 | Rafiq (2 seats) + Nusrat fill Bullet; Shirin stays `REQUESTED` |
 | I-POOL-03 | Shirin → Gulshan 2 does not join a pool containing Nusrat |
@@ -789,7 +796,7 @@ Example, passenger cancel of a matched request:
 | I-DB-08 | Emails are stored lowercase only |
 | I-LIFE-01 | Happy path arrive → start → complete; request statuses and timestamps follow |
 | I-LIFE-02 | Start before arrive, complete before start, arrive twice, act on completed pool → 409 `INVALID_TRANSITION` |
-| I-CANCEL-01 | Cancel while `REQUESTED` |
+| I-CANCEL-01 | Cancel while `REQUESTED`: status, `cancelled_at` and `REQUEST_CANCELLED` event; a double click cancels once; cancelling again → 409 `INVALID_TRANSITION` |
 | I-CANCEL-02 | Rafiq cancels while `MATCHED`: seat released; Nusrat's live estimate loses the discount |
 | I-CANCEL-03 | Cancel after `STARTED` → 409 |
 | I-CANCEL-04 | Last member cancels → pool `CANCELLED`; Jashim can accept again |

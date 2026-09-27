@@ -128,6 +128,40 @@ curl -i -c cookies.txt -H "Origin: http://localhost:3000" -H "Content-Type: appl
 curl -b cookies.txt http://localhost:4000/api/v1/auth/me
 ```
 
+### Zones and fares
+
+| Method | Path | Who | What it does |
+|---|---|---|---|
+| GET | `/api/v1/zones` | signed in | The 9 zones: `{ "zones": [{ "id": "BANANI", "name": "Banani" }, ...] }` |
+| GET | `/api/v1/fares/estimate?pickup=BANANI&dropoff=MOHAKHALI&seats=1` | passenger | Distance plus the `solo` and `pooled` fare breakdowns; nothing is booked. `seats` defaults to 1 |
+
+Fares are ৳50 base plus ৳25 per km, **per seat**, with 20% off when the car is shared. All money in the API is in **poysha** (৳1 = 100 poysha): Banani → Mohakhali (3 km) is `12500` solo and `10000` pooled.
+
+### Rides (passengers)
+
+| Method | Path | What it does |
+|---|---|---|
+| POST | `/api/v1/rides` | Request a ride: `{ "pickupZone": "BANANI", "dropoffZone": "MOHAKHALI", "seats": 1 }` → 201 with the ride (`REQUESTED`, distance, solo estimate) |
+| GET | `/api/v1/rides/current` | Your active ride, or `{ "ride": null }` |
+| GET | `/api/v1/rides?limit=20&cursor=<id>` | Your ride history, newest first. Pass the returned `nextCursor` to get the next page; it is `null` on the last page |
+| GET | `/api/v1/rides/:id` | One of your rides, with its history (`events`) |
+| POST | `/api/v1/rides/:id/cancel` | Cancel your ride while it is still waiting (`REQUESTED`) |
+
+| Status | Code | When |
+|---|---|---|
+| 400 | `VALIDATION_ERROR` | Same pickup and drop-off, an unknown zone, seats not 1 to 3, a bad `limit` or `cursor` |
+| 403 | `FORBIDDEN_ROLE` | A driver calling a passenger endpoint |
+| 404 | `NOT_FOUND` | The ride does not exist **or belongs to someone else** (the same answer on purpose) |
+| 409 | `ACTIVE_REQUEST_EXISTS` | You already have an active ride; `details.rideId` says which |
+| 409 | `INVALID_TRANSITION`, `RIDE_ALREADY_STARTED` | The ride can no longer be cancelled |
+
+```bash
+curl -b cookies.txt -H "Origin: http://localhost:3000" -H "Content-Type: application/json" \
+  -d '{"pickupZone":"BANANI","dropoffZone":"MOHAKHALI"}' http://localhost:4000/api/v1/rides
+```
+
+(Log in as a passenger first, e.g. `nusrat@teslapool.test`; drivers get 403.)
+
 ## Tests
 
 ```bash
