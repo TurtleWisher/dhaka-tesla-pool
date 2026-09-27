@@ -231,3 +231,88 @@ describe('POST /api/v1/rides: new rides join an open pool straight away', () => 
     expect(res.body.ride.status).toBe('REQUESTED');
   });
 });
+
+describe('POST /api/v1/rides/:id/cancel for a MATCHED ride', () => {
+  const cancel = (agent: SignedInAgent, rideId: string) =>
+    agent.post(`/api/v1/rides/${rideId}/cancel`).set('Origin', ORIGIN);
+
+  /** Jashim's pool with Nusrat, then Rafiq auto-joined: 1 seat left. */
+  async function nusratAndRafiq() {
+    await goOnline(jashim);
+    const nusratsRide = (await requestRide(nusrat, 'MOHAKHALI')).body.ride;
+    const pool = (await accept(jashim, nusratsRide.id)).body.pool;
+    const rafiqsRide = (await requestRide(rafiq, 'GULSHAN_1')).body.ride;
+    return { pool, nusratsRide, rafiqsRide };
+  }
+
+  it('[I-CANCEL-02] Rafiq cancels: his seat goes back to the pool, and Nusrat keeps riding', async () => {
+    const { pool, nusratsRide, rafiqsRide } = await nusratAndRafiq();
+
+    const res = await cancel(rafiq, rafiqsRide.id);
+
+    expect(res.status).toBe(200);
+    expect(res.body.ride).toMatchObject({ status: 'CANCELLED', cancelledAt: expect.any(String) });
+    const bullet = await prisma.pool.findUniqueOrThrow({ where: { id: pool.id } });
+    expect(bullet).toMatchObject({ status: 'ACCEPTED', seatsAvailable: 2 });
+    const member = await prisma.poolMember.findFirstOrThrow({ where: { rideRequestId: rafiqsRide.id } });
+    expect(member).toMatchObject({ status: 'LEFT', leftAt: expect.any(Date) });
+    expect(await statusOf(nusratsRide.id)).toBe('MATCHED');
+    const event = await prisma.rideEvent.findFirstOrThrow({ where: { rideRequestId: rafiqsRide.id, type: 'REQUEST_CANCELLED' } });
+    expect(event).toMatchObject({ poolId: pool.id, fromStatus: 'MATCHED', toStatus: 'CANCELLED' });
+    // The freed seat is open again: Shirin can take it.
+    expect((await requestRide(shirin, 'GULSHAN_1')).body.ride.status).toBe('MATCHED');
+  });
+
+  it('[I-CANCEL-04] the last rider out cancels the pool, and Jashim can accept again', async () => {
+    await goOnline(jashim);
+    const nusratsRide = (await requestRide(nusrat, 'MOHAKHALI')).body.ride;
+    const pool = (await accept(jashim, nusratsRide.id)).body.pool;
+
+    expect((await cancel(nusrat, nusratsRide.id)).status).toBe(200);
+
+    const bullet = await prisma.pool.findUniqueOrThrow({ where: { id: pool.id } });
+    expect(bullet).toMatchObject({ status: 'CANCELLED', cancelledAt: expect.any(Date), seatsAvailable: 3 });
+    const poolEvents = await prisma.rideEvent.findMany({ where: { poolId: pool.id, type: 'POOL_CANCELLED' } });
+    expect(poolEvents).toMatchObject([{ fromStatus: 'ACCEPTED', toStatus: 'CANCELLED', actorUserId: null }]);
+
+    const shirinsRide = (await requestRide(shirin, 'GULSHAN_2')).body.ride; // waits: no open pool now
+    expect(shirinsRide.status).toBe('REQUESTED');
+    const next = await accept(jashim, shirinsRide.id);
+    expect(next.status).toBe(200);
+    expect(next.body.pool.id).not.toBe(pool.id);
+  });
+
+  it('[I-CANCEL-02] can still leave after Jashim has arrived (before the trip starts)', async () => {
+    const { pool, rafiqsRide } = await nusratAndRafiq();
+    await prisma.pool.update({ where: { id: pool.id }, data: { status: 'DRIVER_ARRIVED' } });
+
+    const res = await cancel(rafiq, rafiqsRide.id);
+
+    expect(res.status).toBe(200);
+    expect(await prisma.pool.findUniqueOrThrow({ where: { id: pool.id } })).toMatchObject({
+      status: 'DRIVER_ARRIVED',
+      seatsAvailable: 2,
+    });
+  });
+
+  it('[I-CANCEL-02] a double click leaves the pool once: seats come back once, the second click gets 409', async () => {
+    const { pool, rafiqsRide } = await nusratAndRafiq();
+
+    const [a, b] = await Promise.all([cancel(rafiq, rafiqsRide.id), cancel(rafiq, rafiqsRide.id)]);
+
+    expect([a.status, b.status].sort()).toEqual([200, 409]);
+    expect([a, b].find((r) => r.status === 409)?.body.error.code).toBe('INVALID_TRANSITION');
+    expect((await prisma.pool.findUniqueOrThrow({ where: { id: pool.id } })).seatsAvailable).toBe(2);
+    expect(await prisma.rideEvent.count({ where: { type: 'REQUEST_CANCELLED' } })).toBe(1);
+  });
+
+  it('[I-AUTHZ-01] Rafiq cannot cancel Nusrat\'s matched ride', async () => {
+    const { pool, nusratsRide } = await nusratAndRafiq();
+
+    const res = await cancel(rafiq, nusratsRide.id);
+
+    expect(res.status).toBe(404);
+    expect(await statusOf(nusratsRide.id)).toBe('MATCHED');
+    expect((await prisma.pool.findUniqueOrThrow({ where: { id: pool.id } })).seatsAvailable).toBe(1);
+  });
+});

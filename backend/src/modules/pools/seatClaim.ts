@@ -95,3 +95,16 @@ export async function assignRequestToPool(
   });
   return 'MATCHED';
 }
+
+/**
+ * Gives a leaving rider's seats back (§11.6), the twin of the claim: together they are the only
+ * code that changes `seats_available`. Only while the trip has not started (ACCEPTED or
+ * DRIVER_ARRIVED). Like the claim, this locks the pool row first. Returns false if it has started.
+ */
+export async function releaseSeats(tx: Tx, poolId: string, seats: number): Promise<boolean> {
+  const released = await tx.pool.updateMany({
+    where: { id: poolId, status: { in: ['ACCEPTED', 'DRIVER_ARRIVED'] } },
+    data: { seatsAvailable: { increment: seats } },
+  });
+  return released.count === 1;
+}
