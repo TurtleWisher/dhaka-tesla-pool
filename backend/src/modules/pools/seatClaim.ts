@@ -13,6 +13,9 @@ export interface WaitingRequest {
   seats: number;
 }
 
+/** A Prisma `select` that reads exactly a `WaitingRequest`. */
+export const waitingRequestSelect = { id: true, pickupZone: true, dropoffZone: true, seats: true } as const;
+
 /**
  * What happened when we tried to place a request:
  * - MATCHED: it is in the pool now.
