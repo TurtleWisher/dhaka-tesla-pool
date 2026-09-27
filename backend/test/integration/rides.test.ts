@@ -127,3 +127,97 @@ describe('GET /api/v1/rides/current', () => {
     expect((await rafiq.get('/api/v1/rides/current')).body).toEqual({ ride: null });
   });
 });
+
+/** Ends every active ride of this passenger, so the next request is allowed (test setup only). */
+const finishActiveRides = (email: string) =>
+  prisma.rideRequest.updateMany({
+    where: { passenger: { email }, status: 'REQUESTED' },
+    data: { status: 'CANCELLED', cancelledAt: new Date() },
+  });
+
+describe('GET /api/v1/rides (history)', () => {
+  /** Nusrat's three trips, oldest first. */
+  async function threeRides(): Promise<string[]> {
+    const ids: string[] = [];
+    for (const dropoffZone of ['MOHAKHALI', 'GULSHAN_1', 'UTTARA']) {
+      const res = await requestRide(nusrat, { pickupZone: 'BANANI', dropoffZone });
+      ids.push(res.body.ride.id);
+      await finishActiveRides('nusrat@teslapool.test');
+    }
+    return ids;
+  }
+
+  it('[I-RIDE-06] pages through the rides newest first, then says there is nothing more', async () => {
+    const [first, second, third] = await threeRides();
+
+    const page1 = await nusrat.get('/api/v1/rides?limit=2');
+    expect(page1.status).toBe(200);
+    expect(page1.body.rides.map((r: { id: string }) => r.id)).toEqual([third, second]);
+    expect(page1.body.nextCursor).toBe(second);
+
+    const page2 = await nusrat.get(`/api/v1/rides?limit=2&cursor=${page1.body.nextCursor}`);
+    expect(page2.body.rides.map((r: { id: string }) => r.id)).toEqual([first]);
+    expect(page2.body.nextCursor).toBeNull();
+  });
+
+  it('[I-RIDE-06] does not repeat or skip rides when a new one arrives between pages', async () => {
+    const [first, second, third] = await threeRides();
+    const page1 = await nusrat.get('/api/v1/rides?limit=2');
+
+    const newest = (await requestRide(nusrat, { pickupZone: 'BANANI', dropoffZone: 'DHANMONDI' })).body.ride.id;
+    const page2 = await nusrat.get(`/api/v1/rides?limit=2&cursor=${page1.body.nextCursor}`);
+
+    expect(page1.body.rides.map((r: { id: string }) => r.id)).toEqual([third, second]);
+    expect(page2.body.rides.map((r: { id: string }) => r.id)).toEqual([first]); // not "second" again
+    expect((await nusrat.get('/api/v1/rides')).body.rides[0].id).toBe(newest);
+  });
+
+  it('[I-AUTHZ-01] shows each passenger only their own rides', async () => {
+    await threeRides();
+
+    const rafiqs = await rafiq.get('/api/v1/rides');
+
+    expect(rafiqs.body).toEqual({ rides: [], nextCursor: null });
+  });
+
+  it('[I-RIDE-06] refuses a bad limit or cursor with 400, including another passenger\'s ride id', async () => {
+    const rafiqsRide = (await requestRide(rafiq)).body.ride.id;
+
+    const tooMany = await nusrat.get('/api/v1/rides?limit=51');
+    const garbage = await nusrat.get('/api/v1/rides?cursor=not-a-ride');
+    const notHers = await nusrat.get(`/api/v1/rides?cursor=${rafiqsRide}`);
+
+    expect(tooMany.body.error.details).toEqual({ limit: ['limit must be 1 to 50'] });
+    for (const res of [garbage, notHers]) {
+      expect(res.status).toBe(400);
+      expect(res.body.error.details).toEqual({ cursor: ['cursor must be a nextCursor value from a previous page'] });
+    }
+  });
+});
+
+describe('GET /api/v1/rides/:id', () => {
+  it('[I-RIDE-07] shows the passenger their ride and its history', async () => {
+    const created = (await requestRide(nusrat)).body.ride;
+
+    const res = await nusrat.get(`/api/v1/rides/${created.id}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.ride).toMatchObject({ id: created.id, status: 'REQUESTED', estimatedFarePoysha: 12500 });
+    expect(res.body.ride.events).toEqual([
+      { type: 'REQUEST_CREATED', fromStatus: null, toStatus: 'REQUESTED', createdAt: expect.any(String) },
+    ]);
+  });
+
+  it('[I-AUTHZ-01] Rafiq gets the same 404 for Nusrat\'s ride as for a ride that does not exist', async () => {
+    const nusratsRide = (await requestRide(nusrat)).body.ride.id;
+
+    const hers = await rafiq.get(`/api/v1/rides/${nusratsRide}`);
+    const nobodys = await rafiq.get('/api/v1/rides/00000000-0000-4000-8000-000000000000');
+    const malformed = await rafiq.get('/api/v1/rides/42');
+
+    for (const res of [hers, nobodys, malformed]) {
+      expect(res.status).toBe(404);
+      expect(res.body).toEqual({ error: { code: 'NOT_FOUND', message: 'Ride not found' } });
+    }
+  });
+});

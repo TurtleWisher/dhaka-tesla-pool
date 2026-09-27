@@ -42,6 +42,17 @@ export interface RideView {
   cancelledAt: Date | null;
 }
 
+/** One entry of a ride's history, e.g. REQUEST_CREATED at 08:41. */
+export interface RideEventView {
+  type: string;
+  fromStatus: string | null;
+  toStatus: string | null;
+  createdAt: Date;
+}
+
+/** Columns of each history entry shown to the passenger (no actor ids, no internal data). */
+export const rideEventSelect = { type: true, fromStatus: true, toStatus: true, createdAt: true } as const;
+
 /** The type Prisma returns for a ride read with `rideSelect` (generated from the schema). */
 type RideRow = Prisma.RideRequestGetPayload<{ select: typeof rideSelect }>;
 

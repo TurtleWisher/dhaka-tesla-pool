@@ -28,3 +28,19 @@ export const CreateRideBody = z
   })
   .refine((ride) => ride.pickupZone !== ride.dropoffZone, { message: SAME_ZONE, path: ['dropoffZone'] });
 export type CreateRideInput = z.infer<typeof CreateRideBody>;
+
+/** GET /rides?limit=20&cursor=<ride id>: one page of the passenger's history, newest first. */
+export const HistoryQuery = z.object({
+  limit: z.coerce
+    .number({ error: 'limit must be 1 to 50' })
+    .int('limit must be 1 to 50')
+    .min(1, 'limit must be 1 to 50')
+    .max(50, 'limit must be 1 to 50')
+    .default(20),
+  // The id of the last ride on the previous page (the `nextCursor` it returned).
+  cursor: z.uuid('cursor must be a nextCursor value from a previous page').optional(),
+});
+export type HistoryInput = z.infer<typeof HistoryQuery>;
+
+/** A ride id in the URL. Anything that is not a UUID cannot be a ride, so it is a 404. */
+export const RideIdParam = z.uuid();
