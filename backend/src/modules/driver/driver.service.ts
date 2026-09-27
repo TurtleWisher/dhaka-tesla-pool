@@ -1,10 +1,18 @@
+import { canJoin } from '../../domain/matching.js';
 import { ACTIVE_POOL_STATUSES, type RequestStatus } from '../../domain/rideStateMachine.js';
 import type { Zone } from '../../domain/zones.js';
 import { AppError } from '../../lib/errors.js';
 import type { PrismaClient } from '../../lib/prisma.js';
 import { isUniqueViolation } from '../../lib/prismaErrors.js';
 import { type ClaimResult, type Tx, assignRequestToPool, waitingRequestSelect } from '../pools/seatClaim.js';
-import { type PoolView, poolSelect, toPoolView } from './driver.view.js';
+import {
+  type PoolView,
+  type WaitingRideView,
+  poolSelect,
+  toPoolView,
+  toWaitingRideView,
+  waitingRideSelect,
+} from './driver.view.js';
 
 const requestNotFound = () => new AppError(404, 'NOT_FOUND', 'Ride request not found');
 
@@ -84,6 +92,52 @@ export function createDriverService(prisma: PrismaClient) {
         }
         return { isOnline: false };
       });
+    },
+
+    /**
+     * The waiting requests this driver could take right now (A-16), oldest first:
+     * offline → none; no pool under way → every waiting request; an open (ACCEPTED) pool → only
+     * those that pass the pooling rule for it; a pool whose roster is locked → none.
+     */
+    async listRequests(driverId: string): Promise<WaitingRideView[]> {
+      const driver = await prisma.driverProfile.findUniqueOrThrow({
+        where: { userId: driverId },
+        select: { isOnline: true, vehicle: { select: { id: true } } },
+      });
+      if (!driver.isOnline || !driver.vehicle) {
+        return [];
+      }
+      const pool = await prisma.pool.findFirst({
+        where: { vehicleId: driver.vehicle.id, status: { in: [...ACTIVE_POOL_STATUSES] } },
+        select: {
+          status: true,
+          pickupZone: true,
+          seatsAvailable: true,
+          members: { where: { status: 'ACTIVE' }, select: { rideRequest: { select: { dropoffZone: true } } } },
+        },
+      });
+      if (pool && pool.status !== 'ACCEPTED') {
+        return [];
+      }
+
+      const waiting = await prisma.rideRequest.findMany({
+        // With an open pool, let the database narrow it down first: same pickup, seats that fit.
+        where: { status: 'REQUESTED', ...(pool && { pickupZone: pool.pickupZone, seats: { lte: pool.seatsAvailable } }) },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        take: 50,
+        select: waitingRideSelect,
+      });
+      const fitting = pool
+        ? waiting.filter((ride) =>
+            canJoin(ride, {
+              status: pool.status,
+              pickupZone: pool.pickupZone,
+              seatsAvailable: pool.seatsAvailable,
+              memberDropoffZones: pool.members.map((member) => member.rideRequest.dropoffZone),
+            }),
+          )
+        : waiting;
+      return fitting.map(toWaitingRideView);
     },
 
     /**

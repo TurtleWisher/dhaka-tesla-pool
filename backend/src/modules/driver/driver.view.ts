@@ -53,3 +53,34 @@ export function toPoolView(row: PoolRow): PoolView {
     })),
   };
 }
+
+/** The columns a driver sees about a waiting request (A-18). Used as a Prisma `select`. */
+export const waitingRideSelect = {
+  id: true,
+  pickupZone: true,
+  dropoffZone: true,
+  seats: true,
+  distanceM: true,
+  estimatedFarePoysha: true,
+  createdAt: true,
+  passenger: { select: { name: true } },
+} as const;
+
+/** A waiting request as a driver sees it: enough to decide, and to know whom to pick up. */
+export interface WaitingRideView {
+  id: string;
+  passengerName: string;
+  pickupZone: Zone;
+  dropoffZone: Zone;
+  seats: number;
+  distanceM: number;
+  estimatedFarePoysha: number;
+  createdAt: Date;
+}
+
+type WaitingRideRow = Prisma.RideRequestGetPayload<{ select: typeof waitingRideSelect }>;
+
+/** Turns a database row into the API shape: the passenger object becomes just their name. */
+export function toWaitingRideView({ passenger, ...ride }: WaitingRideRow): WaitingRideView {
+  return { ...ride, passengerName: passenger.name };
+}

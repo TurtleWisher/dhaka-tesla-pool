@@ -25,6 +25,10 @@ export function createDriverRouter(driverService: DriverService): Router {
     res.json({ driver: await driverService.goOffline(currentUser(req).id) });
   });
 
+  router.get('/requests', async (req, res) => {
+    res.json({ requests: await driverService.listRequests(currentUser(req).id) });
+  });
+
   router.post('/requests/:id/accept', async (req, res) => {
     const pool = await driverService.accept(currentUser(req).id, requestIdFrom(req.params.id));
     res.json({ pool });
