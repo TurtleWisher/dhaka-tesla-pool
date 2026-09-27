@@ -4,6 +4,7 @@ import { distanceMetres } from '../../domain/zones.js';
 import { AppError } from '../../lib/errors.js';
 import type { PrismaClient } from '../../lib/prisma.js';
 import { isUniqueViolation } from '../../lib/prismaErrors.js';
+import { assignRequestToPool } from '../pools/seatClaim.js';
 import type { CreateRideInput, HistoryInput } from './rides.schemas.js';
 import { type RideEventView, type RideView, rideEventSelect, rideSelect, toRideView } from './rides.view.js';
 
@@ -40,13 +41,17 @@ export function createRidesService(prisma: PrismaClient) {
     });
 
   return {
-    /** Creates a REQUESTED ride with its distance and solo estimate, and logs REQUEST_CREATED. */
+    /**
+     * Creates a ride with its distance and solo estimate and logs REQUEST_CREATED, then tries
+     * to place it in an open pool straight away (A-03, the "system path"). All in one
+     * transaction: the passenger gets back either a waiting (REQUESTED) or a MATCHED ride.
+     */
     async create(passengerId: string, input: CreateRideInput): Promise<RideView> {
       const distanceM = distanceMetres(input.pickupZone, input.dropoffZone);
       const estimate = calculateFare({ distanceM, seats: input.seats, pooled: false });
 
       try {
-        // One transaction: the ride and its first history entry are saved together, or not at all.
+        // One transaction: the ride, its history and any pool match are saved together, or not at all.
         const ride = await prisma.$transaction(async (tx) => {
           const created = await tx.rideRequest.create({
             data: {
@@ -68,7 +73,22 @@ export function createRidesService(prisma: PrismaClient) {
               data: { pickupZone: input.pickupZone, dropoffZone: input.dropoffZone, seats: input.seats },
             },
           });
-          return created;
+
+          // Open pools with the same pickup and enough free seats, oldest first. The seat claim
+          // decides for real (it checks seats and the drop-off rule while holding the pool's lock).
+          const openPools = await tx.pool.findMany({
+            where: { status: 'ACCEPTED', pickupZone: input.pickupZone, seatsAvailable: { gte: input.seats } },
+            orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+            take: 10,
+            select: { id: true },
+          });
+          for (const pool of openPools) {
+            if ((await assignRequestToPool(tx, pool.id, created, null)) === 'MATCHED') {
+              break;
+            }
+          }
+          // Read it back: it may be MATCHED now.
+          return tx.rideRequest.findUniqueOrThrow({ where: { id: created.id }, select: rideSelect });
         });
         return toRideView(ride);
       } catch (err) {

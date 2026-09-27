@@ -176,3 +176,58 @@ describe('POST /api/v1/driver/requests/:id/accept', () => {
     expect(res.body.error.code).toBe('FORBIDDEN_ROLE');
   });
 });
+
+describe('POST /api/v1/rides: new rides join an open pool straight away', () => {
+  it('[I-POOL-01] the story: Jashim accepts Nusrat, Rafiq joins at once, Shirin takes the last seat', async () => {
+    await goOnline(jashim);
+    const pool = (await accept(jashim, (await requestRide(nusrat, 'MOHAKHALI')).body.ride.id)).body.pool;
+
+    const rafiqs = await requestRide(rafiq, 'GULSHAN_1'); // 2 km from Mohakhali
+    const shirins = await requestRide(shirin, 'GULSHAN_1'); // 2 km and 0 km
+
+    expect(rafiqs.status).toBe(201);
+    expect(rafiqs.body.ride).toMatchObject({ status: 'MATCHED', matchedAt: expect.any(String) });
+    expect(shirins.body.ride.status).toBe('MATCHED');
+    const bullet = await prisma.pool.findUniqueOrThrow({ where: { id: pool.id } });
+    expect(bullet.seatsAvailable).toBe(0); // Bullet 3/3
+    const rafiqsEvents = await prisma.rideEvent.findMany({ where: { rideRequestId: rafiqs.body.ride.id }, orderBy: { id: 'asc' } });
+    expect(rafiqsEvents).toMatchObject([
+      { type: 'REQUEST_CREATED', poolId: null },
+      { type: 'REQUEST_MATCHED', poolId: pool.id, actorUserId: null },
+    ]);
+  });
+
+  it('[I-POOL-03] Shirin to Gulshan 2 does not join a pool with Nusrat (4 km apart), and waits', async () => {
+    await goOnline(jashim);
+    await accept(jashim, (await requestRide(nusrat, 'MOHAKHALI')).body.ride.id);
+
+    const res = await requestRide(shirin, 'GULSHAN_2');
+
+    expect(res.status).toBe(201);
+    expect(res.body.ride.status).toBe('REQUESTED');
+    expect(res.body.ride.matchedAt).toBeNull();
+  });
+
+  it('[I-POOL-02] with Rafiq holding 2 seats, Nusrat takes the last seat and Shirin waits', async () => {
+    await goOnline(jashim);
+    await accept(jashim, (await requestRide(rafiq, 'GULSHAN_1', 2)).body.ride.id); // 1 seat left
+
+    const nusrats = await requestRide(nusrat, 'MOHAKHALI');
+    const shirins = await requestRide(shirin, 'GULSHAN_1');
+
+    expect(nusrats.body.ride.status).toBe('MATCHED');
+    expect(shirins.body.ride.status).toBe('REQUESTED');
+  });
+
+  it('[I-POOL-03] a ride from another pickup zone does not join', async () => {
+    await goOnline(jashim);
+    await accept(jashim, (await requestRide(nusrat, 'MOHAKHALI')).body.ride.id);
+
+    const res = await rafiq
+      .post('/api/v1/rides')
+      .set('Origin', ORIGIN)
+      .send({ pickupZone: 'MOHAKHALI', dropoffZone: 'GULSHAN_1' });
+
+    expect(res.body.ride.status).toBe('REQUESTED');
+  });
+});
